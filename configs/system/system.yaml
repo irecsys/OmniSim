@@ -39,7 +39,7 @@ data_path: data/
 # For self-hosted OpenAI-compatible models set: openai_api_base
 openai_provider: azure
 chat_model: gpt-4o-mini
-chat_endpoint: https://conv.openai.azure.com/
+chat_endpoint: https://YOUR_RESOURCE.openai.azure.com/
 chat_api_version: "2024-02-01"
 
 
@@ -48,7 +48,7 @@ chat_api_version: "2024-02-01"
 # sentence-transformers runs locally (no API key required).
 embeddings_provider: azure
 embeddings_model: text-embedding-3-small
-embeddings_endpoint: https://conv.openai.azure.com/
+embeddings_endpoint: https://YOUR_RESOURCE.openai.azure.com/
 embeddings_api_version: "2024-02-01"
 
 
