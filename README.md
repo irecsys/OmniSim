@@ -1,5 +1,7 @@
 # OmniSim: Conversational Recommendation Dialogue Simulator
 
+![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 
 OmniSim generates realistic, personalised, multi-turn conversational recommendation dialogues from item metadata alone.  It combines LLM-based generation with Elasticsearch-grounded retrieval to mitigate hallucination and produces human-level lexical diversity across any item domain (movies, fashion, e-commerce, …).
 
