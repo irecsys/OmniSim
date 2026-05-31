@@ -1,0 +1,89 @@
+# ============================================================
+# hm.yaml — User config for H&M fashion dataset
+# Overrides system.yaml defaults. See configs/system/system.yaml for all options.
+# ============================================================
+
+# ElasticSearch
+es_index: hm-2025
+
+# Dataset
+dataset: hm
+file_items: hm.csv
+file_users: users.csv
+file_interactions: interactions.csv
+
+col_userid: user_id
+col_rating: rating
+
+col_itemid: productId
+col_title: productName
+col_category: gender_type
+col_details: details         # raw product description (style, fit, features)
+
+# Embedding: most discriminative fields first (gender/type for category matching,
+# then name/color/details for style/semantic matching)
+embedding_fields: ["gender", "item_type", "productName", "colorName", "details"]
+
+# ES field types for filtering
+keyword_fields: ["gender", "item_type"]   # exact-match filters (e.g. gender=Women)
+numeric_fields: ["price"]                 # range filters (e.g. price <= 50)
+
+# BM25 field (paper Eq. 5): query is scored against ONE aggregated "details"
+# field (M_i,d = all attributes concatenated), built at index time as
+# `bm25_details` from `embedding_fields`. Override the name here if needed.
+bm25_details_field: bm25_details
+
+# Attributes for search / conversation
+default_attributes: ["gender", "item_type", "colorName", "price"]
+item_attributes: {
+    "gender":       "styles, such as men's, women's, unisex, or kid's",
+    "item_type":    "clothing type",
+    "colorName":    "color",
+    "price":        "price range",
+    "materials":    "materials",
+    "brandName":    "brand",
+    "gender_type":  "category",
+    "description":  "description",
+    "size":         "size",
+    "fit":          "fit",
+    "occasion":     "occasion",
+    "season":       "season",
+    "pattern":      "pattern",
+    "neckline":     "neckline",
+    "sleeve":       "sleeve style"
+}
+
+# Simulation roles
+role_user: fashion shopper
+role_bot: fashion assistant
+
+# Fashion-specific opening templates (replaces IMDB "I want to watch a {t}")
+initial_user_templates:
+  - "I'm looking for a {t}"
+  - "I need a {t}"
+  - "Can you help me find a {t}?"
+  - "I'm after a {t}"
+  - "I'd love to find a {t}"
+  - "Help me find a {t}"
+  - "Any recommendations for a {t}?"
+  - "I'm in the mood for a {t}"
+  - "What {t} would you suggest?"
+  - "I want to buy a {t}"
+  - "I'd like to get a {t}"
+  - "Something like a {t} would be great"
+  - "I'm shopping for a {t}"
+  - "Got any {t} suggestions?"
+  - "I'm trying to find a {t}"
+
+# ── Simulation Strategies ───────────────────────────────────────────────────
+# chats_per_entry: N  →  generate N conversations per input unit (pair/item/user)
+
+
+input_pairs_file: configs/hm/inputs/test_pairs.csv
+input_items_file: configs/hm/inputs/test_items.csv
+input_users_file: configs/hm/inputs/test_users.csv
+chats_per_entry: 1
+num_workers: 3       # Theta API limit — keep low to avoid 409 Conflict
+
+# Strategy 4: fully random  (anonymous user, randomly sampled items from ES)
+guestuser_randomitem_records: 40

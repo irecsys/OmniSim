@@ -1,0 +1,369 @@
+# ============================================================
+# SimuConv Prompt Templates — English (default)
+# ============================================================
+# Placeholders use {variable} syntax and are filled at runtime.
+# Available variables per section are listed in comments.
+# ============================================================
+
+# ── Attribute rephrasing ─────────────────────────────────────
+# Variables: {role_user}, {value}
+rephrase_features_system: "You rewrite structured attribute values into short, natural user-style sentences only."
+rephrase_features_prompt: |
+  You are a rewriting assistant on behalf of a {role_user}.
+  Convert the following item features into a natural, user-style sentence, max 20 words.
+  Use varied phrasing each time — avoid formulaic openings like "I'm looking for" or "I want".
+  Do not add extra explanations, only return the rephrased sentence.
+
+  Features: {value}
+rephrase_attribute_prompt: |
+  You are a rewriting assistant on behalf of a {role_user}.
+  The user is expressing their preference about "{attribute_meaning}" of an item.
+  The raw value is: {value}
+
+  First understand what this value means in the context of "{attribute_meaning}", then
+  express it as a short, natural spoken sentence (max 15 words) as if a real person is chatting.
+  Use varied phrasing — avoid starting with "I want" or "I'm looking for" every time.
+  Do NOT wrap the sentence in quotes. Return only the plain sentence, nothing else.
+
+  Examples of natural phrasing:
+  - rating=8.5 → Something really well-rated would be great.
+  - runtime=148 → I'm fine with a longer movie.
+  - genres=Action,Thriller → Something thrilling with plenty of action.
+  - release_year=1994 → A classic from the nineties sounds perfect.
+
+# ── Attribute extraction from item details ───────────────────
+# Variables: {attribute}, {details}
+extract_attribute_prompt: |
+  You are an information extraction assistant.
+  Your task is to extract the value of the item attribute: "{attribute}"
+  from the item description below.
+
+  Rules:
+  - Return your answer strictly as a JSON object of the form: {{"value": "..."}}.
+  - If the attribute is not found, return: {{"value": null}}.
+  - Do not explain, do not add extra text.
+
+  item description:
+  {details}
+
+# ── Candidate attribute extraction ──────────────────────────
+# Variables: {role_bot}, {item_type}, {target_category}
+extract_candidate_attrs_prompt: |
+  You are a {role_bot}.
+  The user is looking for a {item_type} (category: {target_category}).
+  List the 5-10 most important attributes or features a user may care about
+  for making decisions in consumption or purchases. Examples are brand, color, size
+  for products in e-commerce domains; or movie director, genre, actors in movie domains.
+
+  Return them as a valid JSON list of strings. Do not add explanations.
+
+# Variables: {role_bot}, {item_type}, {target_category}, {final_attributes}
+filter_attrs_prompt: |
+  You are a {role_bot}.
+  The user is searching for a {item_type} (category: {target_category}).
+  Given this list of attributes:
+  {final_attributes}
+
+  Return only the attributes that are relevant for this type of item.
+  Output as a valid JSON list of strings. Do not explain.
+
+# ── Dynamic description extraction from chat ────────────────
+# Variables: {role_bot}, {chat_history}
+extract_description_prompt: |
+  You are a {role_bot}.
+  Based on the conversation history below, summarize in 1-2 sentences what the user is looking for.
+  Be specific. Focus on attributes, category, and style preferences.
+  Return only the summary, no quotes.
+
+  Conversation:
+  {chat_history}
+
+# ── Item type extraction from title ─────────────────────────
+# Variables: {title}
+extract_item_type_prompt: |
+  What specific type of item is "{title}"? Reply with 2-5 words only that describe the genre/style (e.g. "dark comedy film", "gritty action thriller", "romantic drama", "indie mystery movie", "animated family film").
+  Be specific about the style or tone, not just "movie". Do not add explanations or punctuation.
+
+# ── Chitchat — system message ────────────────────────────────
+# Variables: {role_bot}
+chitchat_system: |
+  You are a friendly {role_bot}.
+  Generate short, natural conversational phrases.
+  IMPORTANT: Be creative and avoid repeating the same expressions across conversations.
+  Vary your vocabulary, sentence structure, and tone every single time.
+  About 40% of the time, use a very short phrase of just 2-6 words like real people do
+  (e.g. 'Sounds good!', 'Got it.', 'Let me check!', 'Interesting choice!', 'On it!',
+  'Ooh nice.', 'Hmm, let me think.', 'Right, okay!', 'Sure thing.', 'Leave it to me.').
+  The rest of the time, 1 sentence is enough — never write more than 1 sentence.
+
+# ── Chitchat — bot contexts ──────────────────────────────────
+# Variables: {role}, {user_context}
+chitchat_greeting: |
+  You are a friendly {role}. {user_context}
+  Write a warm, original 1-2 sentence opening greeting. Be inventive — no two greetings alike.
+  Do NOT describe yourself as a bot or say "I am your {role}".
+  Do NOT use tired openers like "Hello!", "Hi there!", "Welcome!", or "Greetings!".
+  Do NOT reference any specific genres, themes, or content types — keep the greeting completely generic.
+  Try starting with a question, an observation, a playful remark, or an invitation.
+  Examples of good variety: "Anything catching your eye lately?", "Ready to find something great?",
+  "What kind of mood are we in today?", "Let's see what we can dig up for you."
+  Return only the phrase, no quotes.
+
+# Variables: {role}, {user_context}, {category}
+chitchat_category_react: |
+  You are a friendly {role}. {user_context}
+  The user wants something in the category: "{category}".
+  React naturally in 1 original sentence — show genuine interest specific to that category.
+  Avoid all generic filler like "Great choice!", "Awesome!", "Fantastic!", "Perfect!".
+  Instead, comment on something specific about the category, or ask a follow-up thought.
+  Examples: "Oh, {category} — there's so much range there.", "Nice, I know some hidden gems in {category}.",
+  "That's a fun space to explore.", "Good call, {category} has been on fire lately."
+  Return only the phrase, no quotes.
+
+# Variables: {role}, {user_context}
+chitchat_pre_recommendation: |
+  You are a friendly {role}. {user_context}
+  Write a short, original 1-sentence transition before presenting recommendations.
+  Mix it up every time — try different angles: excitement, curiosity, confidence, casualness.
+  Avoid: "let me find", "I've got", "Based on your interests", "we recommend", "you might enjoy",
+  "here are some", "check these out", "I think you'll love".
+  Try instead: something like thinking out loud, a brief aside, a rhetorical question, or a teaser.
+  Examples: "Okay, pulled a few together.", "These jumped out at me.", "Took a little digging but...",
+  "Had a hunch about these.", "Funny you mention that —", "Not obvious choices, but hear me out."
+  Return only the phrase, no quotes.
+
+# Variables: {role}, {user_context}
+chitchat_follow_up: |
+  You are a friendly {role}. {user_context}
+  The user rejected your last recommendations. Write a short, empathetic and original 1-2 sentence response.
+  Acknowledge the miss without being defensive. Show you're listening and adjusting.
+  Avoid all stock phrases: "No worries", "Let's try again", "I understand", "Sorry about that",
+  "Don't worry", "I see", "Got it, let me try".
+  Try instead: something curious, self-aware, or lightly playful.
+  Examples: "Fair enough, those weren't quite right.", "Okay, back to the drawing board.",
+  "Noted — that narrows it down nicely.", "Hmm, sounds like I missed the mark.",
+  "Alright, tell me more and I'll take another swing.", "Those clearly weren't it — what felt off?"
+  Return only the phrase, no quotes.
+
+# Variables: {role}, {user_context}
+chitchat_closing: |
+  You are a friendly {role}. {user_context}
+  The user found what they were looking for. Write a warm, original 1-sentence send-off.
+  Make it feel genuine and avoid generic phrases like "Hope you enjoy it!", "Have fun!",
+  "Enjoy!", "Happy watching!", or "Let me know if you need anything else."
+  Try something personal, witty, or specific to the moment.
+  Examples: "That one's a great pick.", "You're going to have a good time with that.",
+  "Nice — I had a feeling about that one.", "That's a solid choice, enjoy every minute.",
+  "Go enjoy it — you've earned it."
+  Return only the phrase, no quotes.
+
+# Variables: {role}, {user_context}
+chitchat_transition: |
+  You are a friendly {role}. {user_context}
+  Write a casual, original 1-sentence remark to keep the conversation going.
+  Make it feel spontaneous — like something said between friends, not a customer service script.
+  Vary the tone: sometimes curious, sometimes playful, sometimes thoughtful.
+  Avoid all hollow filler: "Sure!", "Of course!", "Absolutely!", "Let me know!", "Feel free to ask!".
+  Examples: "Tell me a bit more — I want to get this right.", "Curious what else is on your mind.",
+  "I've got a few angles I could try.", "What's pulling you in that direction?",
+  "We're getting somewhere — keep going."
+  Return only the phrase, no quotes.
+
+# ── Chitchat — user simulation ───────────────────────────────
+# Variables: {role_user}
+chitchat_user: |
+  You are simulating a {role_user} having a casual conversation.
+  Write one spontaneous, natural remark — vary tone, vocabulary, and length every time.
+  Sometimes brief (3-6 words), sometimes a full thought. Sound like a real person, not a template.
+  Avoid predictable openers like "I'm looking for", "I want", "Can you", "Could you".
+  Try instead: reactions, observations, partial thoughts, questions, or casual comments.
+  Examples: "Hmm, not sure yet.", "Something a bit different maybe?", "Yeah exactly.",
+  "Actually I've been in the mood for...", "That's not quite it.", "Ooh what about..."
+  Return only the phrase, no quotes.
+
+# ── User acceptance ──────────────────────────────────────────
+# Variables: {role_user}, {title}
+user_acceptance_prompt: |
+  You are simulating a {role_user} who just found the item they were looking for: "{title}".
+  Write a short, natural acceptance response (1 sentence max).
+  Sound like a real person — NEVER repeat the same phrasing across conversations.
+  Vary tone, length, and style: sometimes enthusiastic, sometimes casual, sometimes brief, sometimes personal.
+  Reference the title "{title}" or react to it specifically when possible.
+  DO NOT use these overused phrases: "That's the one", "Perfect", "Great", "Exactly", "Yes please".
+  Return only the response, no quotes.
+
+# ── Bot closing failed ────────────────────────────────────────
+# Variables: {role_bot}
+bot_closing_failed_prompt: |
+  You are a {role_bot} who could not find the right recommendation for the user.
+  Write a brief, warm closing message (1 sentence).
+  Be genuine — avoid hollow apologies like "Sorry", "Don't worry", "I apologize".
+  Try something self-aware, light, or encouraging.
+  Examples: "Didn't get there today — but I'm sure you'll find it.",
+  "Tough one — come back and we'll try again.", "Slipped through my fingers this time.",
+  "I'll do better next time — promise.", "Not my best showing, but worth another shot."
+  Return only the phrase, no quotes.
+
+# ── Rejection explanation ────────────────────────────────────
+# Variables: {role_user}
+rejection_system: "You are simulating a {role_user} who is NOT satisfied with the recommendations. Stay in character. Be direct but natural — like a real person, not a complaint form. NEVER mention any specific item title or name."
+
+# Variables: {role_user}, {target_props}, {rec_summaries}, {prior_context}
+rejection_prompt: |
+  You are simulating a {role_user} who is NOT satisfied with these recommendations.
+  What you actually want: {target_props}
+  What you were just shown: {rec_summaries}
+  {prior_context}
+  Write a natural 1-2 sentence rejection explaining the SPECIFIC mismatch (wrong genre, era, tone, style, etc.).
+  Be direct and varied — avoid starting every rejection with "I" or "These don't".
+  Sometimes lead with the mismatch ("That's too horror-heavy for me."),
+  sometimes with a redirect ("I was thinking more along the lines of romance."),
+  sometimes with a mild reaction ("Hmm, not quite — those are all thrillers.").
+  Be consistent with prior statements. Keep it concise.
+  CRITICAL: Do NOT mention any specific title, movie name, product name, or item name. Describe only genre, tone, style, era, or attributes.
+  Return only the rejection message, no quotes.
+
+# ── Recommendation explanation ───────────────────────────────
+# Variables: {role_bot}
+rec_explanation_system: "You are a helpful {role_bot}. Write a very short rationale (max 10 words) for why the recommended item suits the user. Only mention features that genuinely exist in the item."
+
+# Variables: {role_bot}, {items_str}
+rec_explanation_prompt: |
+  You are a {role_bot} recommending an item to a user.
+  Item you are recommending: {items_str}
+  Write ONE very short phrase (max 10 words) connecting this item to what the user wants.
+  Examples: "Fits your dark thriller vibe." / "Matches the historical drama feel." / "Right tone and era."
+  Only mention real attributes. Return only the phrase, no quotes.
+
+# ── Free-mode user simulation ────────────────────────────────
+# Variables: {role_user}, {role_bot}, {profile_context}, {target_context}
+free_user_system: |
+  You are simulating a {role_user} in a conversation with a {role_bot}.
+  {profile_context}
+  {target_context}
+  Stay in character and give natural, realistic responses.
+  IMPORTANT: Always stay consistent with the category/genre you stated you want.
+  Do NOT switch to a completely different genre or say you do NOT want what you initially asked for.
+  Do NOT reveal or mention any personal details (age, gender, profession, nationality, etc.).
+  CRITICAL: Do NOT mention any specific title, movie name, product name, or item name — describe only genre, tone, style, era, or attributes.
+  Vary your response length and phrasing naturally like a real person:
+  - Sometimes just 2-5 words (e.g. 'yeah that sounds right', 'not really', 'hmm maybe', 'yes exactly', 'nah not that')
+  - Sometimes a short phrase (e.g. 'something a bit darker maybe', 'more like an indie vibe')
+  - Sometimes 1 sentence — never more than 1-2 sentences total.
+  Do NOT always start with "I'm looking for" or "I want" — vary your openers.
+
+# Short reply prompts (randomly chosen)
+free_user_short_prompts:
+  - "Reply as the user in 3-8 words with one new descriptive detail about the item. Return only those words."
+  - "Give a short user reply, 3-8 words, adding one more detail about the desired item. Return only those words."
+  - "As the user, add one brief descriptive detail about the item in 3-8 words. Return only those words."
+  - "Short user reply only, 3-8 words, describing another quality of the item. Return only those words."
+
+# Expression style variants (randomly chosen) — Variables: {attr_dict}
+free_user_expression_styles:
+  - "Naturally share your preference about these: {attr_dict}. Be conversational and specific."
+  - "As the user, express what you're looking for, touching on: {attr_dict}. Use your own words."
+  - "Describe what you want in your own words, referencing: {attr_dict}. Sound like a real person."
+  - "Mention these preferences in a natural, relaxed way: {attr_dict}. Add a personal touch if it fits."
+  - "Talk about what matters to you here: {attr_dict}. Keep it casual and genuine."
+  - "React to {attr_dict} as the user — what resonates, what doesn't? Be specific and natural."
+  - "As the user, bring up {attr_dict} the way you'd mention it to a friend. Keep it real."
+  - "Use {attr_dict} as a starting point and express your preference in your own voice."
+
+# Attribute-based user prompt template — Variables: {expression_style}
+free_user_attr_prompt: |
+  Continue the conversation as the user.
+  {expression_style}
+  Keep it 1-2 sentences max. Vary how you open — don't always start with "I".
+  Do NOT mention any specific title, movie name, product name, or item name.
+  Return only the user's message, no quotes.
+
+# Details-based user prompt — Variables: {target_details}
+free_user_details_prompt: |
+  Continue the conversation as the user.
+  Based on this description of the item you want: {target_details}
+  Add 1-2 new descriptive details about the item you're looking for.
+  IMPORTANT: Do NOT repeat anything you have already mentioned in the conversation above.
+  Focus on aspects like style, tone, feel, setting, or themes — NOT specific named attributes.
+  Sound human and varied — sometimes enthusiastic, sometimes matter-of-fact, sometimes curious.
+  Don't always start with "I".
+  Do NOT mention any specific title, movie name, product name, or item name.
+  Return only the user's message, no quotes.
+
+# ── Bot short follow-up questions (randomly chosen when bot_short_followup_ratio triggers)
+# These replace long bot questions like "Could you describe your desired item in a few words?"
+# ── Adaptive mode: bot attribute questions (randomly chosen, replace "What is your preference for X?")
+# Placeholder: {attribute}
+adaptive_pref_questions:
+  - "Any preference on {attribute}?"
+  - "What about {attribute}?"
+  - "Does {attribute} matter to you?"
+  - "Any thoughts on {attribute}?"
+  - "How do you feel about {attribute}?"
+  - "Any requirements for {attribute}?"
+  - "Do you care about {attribute}?"
+  - "What's your take on {attribute}?"
+  - "Anything specific for {attribute}?"
+  - "Is {attribute} important to you?"
+  - "Any must-haves for {attribute}?"
+  - "How about {attribute} — any preference?"
+
+# ── Adaptive mode: user "no preference" replies (randomly chosen)
+adaptive_no_preference:
+  - "Not really."
+  - "Doesn't matter."
+  - "No strong feelings on that."
+  - "I'm open to anything."
+  - "No preference."
+  - "Whatever works."
+  - "Not fussed."
+  - "No specific requirements."
+  - "I'll leave that open."
+  - "No particular preference."
+  - "Happy with whatever."
+  - "Nothing specific."
+  - "Up to you."
+  - "Open to anything on that."
+  - "Not a dealbreaker for me."
+
+# ── Bot short follow-up questions (randomly chosen when bot_short_followup_ratio triggers)
+# These replace long bot questions like "Could you describe your desired item in a few words?"
+bot_short_followups:
+  - "Tell me more?"
+  - "What else?"
+  - "Go on?"
+  - "Any more detail?"
+  - "More details?"
+  - "Such as?"
+  - "Describe it more?"
+  - "In what way?"
+  - "What else about it?"
+  - "How so?"
+  - "Anything else?"
+  - "Keep going."
+  - "A little more?"
+  - "Got it — what else?"
+  - "And?"
+  - "Say more."
+  - "More about the item?"
+  - "What else should I know?"
+  - "Tell me another detail."
+  - "Keep describing it."
+  - "Can you expand on that?"
+  - "What else comes to mind?"
+  - "Add one more detail?"
+  - "Give me a clearer picture?"
+  - "What else about the product?"
+
+# Fallback prompts when no attributes remain (randomly chosen)
+free_user_fallback_prompts:
+  - "Something with a clear personality would be good."
+  - "I want it to feel like a strong match, not just a generic option."
+  - "A little more character would help."
+  - "Something distinctive would be nice."
+  - "I have a rough idea, but I'm still narrowing it down."
+  - "Something that feels thoughtfully chosen would work."
+  - "I'd like it to have a bit more depth."
+  - "Something memorable would be ideal."
+  - "I'm picturing something with a more specific feel."
+  - "Something that stands out from the usual options."

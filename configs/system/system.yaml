@@ -1,0 +1,122 @@
+# ============================================================
+# system.yaml — OmniSim global defaults
+#
+# All parameters here can be overridden by a dataset config
+# (e.g. configs/imdb/imdb.yaml).  Only set what you need to
+# change in the dataset config; everything else inherits from
+# this file.
+# ============================================================
+
+
+# ── Prompt templates ─────────────────────────────────────────
+# Override per dataset:  prompts_file: configs/prompts/my_prompts.yaml
+prompts_file: configs/prompts/default.yaml
+
+
+# ── LLM temperatures ─────────────────────────────────────────
+# Higher values → more lexical diversity (improves Distinct-1/2).
+# Lower values  → more consistent / factual outputs.
+temp_rephrase:    0.8   # user-preference rephrasing
+temp_chitchat:    1.2   # chit-chat generation
+temp_rejection:   0.7   # rejection-explanation generation
+temp_rec_explain: 0.7   # recommendation-explanation generation
+temp_free_user:   0.7   # user response generation in Free mode
+
+
+# ── System ───────────────────────────────────────────────────
+seed: 2025
+num_workers: 8          # parallel threads (I/O-bound — LLM API calls)
+max_questions: 3        # max clarifying turns before forcing a recommendation
+library_name: OmniSim
+library_version: 1.0
+log_path_outputs: logs/
+data_path: data/
+
+
+# ── LLM provider ─────────────────────────────────────────────
+# Options: openai | azure | thetaedgecloud
+# For Azure also set: azure_openai_endpoint, azure_openai_api_version
+# For self-hosted OpenAI-compatible models set: openai_api_base
+openai_provider: azure
+chat_model: gpt-4o-mini
+chat_endpoint: https://conv.openai.azure.com/
+chat_api_version: "2024-02-01"
+
+
+# ── Embeddings provider ───────────────────────────────────────
+# Options: openai | azure | thetaedgecloud | sentence-transformers
+# sentence-transformers runs locally (no API key required).
+embeddings_provider: azure
+embeddings_model: text-embedding-3-small
+embeddings_endpoint: https://conv.openai.azure.com/
+embeddings_api_version: "2024-02-01"
+
+
+# ── Elasticsearch ─────────────────────────────────────────────
+es_host: http://localhost:9200
+
+
+# ── Default column names ──────────────────────────────────────
+# Override in dataset config to match your CSV column headers.
+file_items:        items.csv
+file_users:        users.csv
+file_interactions: interactions.csv
+col_userid:   user_id
+col_itemid:   item_id
+col_rating:   rating
+col_title:    title
+col_category: category
+col_details:  details
+
+
+# ── Simulation ────────────────────────────────────────────────
+mode_refinement: free     # Dialogue mode: free | static | adaptive
+threshold_similarity: 0.3 # Minimum normalised cosine score S̃_cos to keep a candidate
+max_similar_items: 10     # Top-k candidates fetched from ES per dialogue turn
+max_rec_attempts: 6       # Max recommendation rounds before ending the dialogue
+rec_top_n: 1              # Number of items presented per recommendation turn
+expand_query: true        # LLM expands user text into richer search keywords before embedding
+
+
+# ── Hybrid scoring (Equations 3–6 in the paper) ──────────────
+#
+# Eq. 5 — Base retrieval score:
+#   S̃_base(q, i) = λ · S̃_BM25(q, M_i,d) + (1 − λ) · S̃_cos(q, i)
+#
+# Eq. 6 — Hybrid score (with user profile):
+#   S̃_hybrid = α · S̃_base + (1 − α) · [β · S̃_cos(i, p_short) + (1 − β) · S̃_cos(i, p_long)]
+#
+# Score normalisation (Eq. 4):
+#   Cosine → S̃ = (s + 1) / 2          (maps [-1,1] to [0,1])
+#   BM25   → S̃ = (s − s_min) / (s_max − s_min)   (min-max)
+#
+# Notes:
+#   • If no user profile is available, α is set to 1 internally (pure retrieval).
+#   • If interactions.csv has no timestamps, β is set to 0 (long-term only).
+lambda_bm25:             0.3   # λ — BM25 weight in Eq. 5
+weight_es_score:         0.7   # α — base-score weight in Eq. 6
+weight_user_taste_short: 0.3   # β — short-term preference ratio in Eq. 6
+
+
+# ── Conversational behaviour ──────────────────────────────────
+# All ratios are probabilities in [0, 1].
+chit_chat_ratio:             0.75  # probability of adding chit-chat to a bot turn
+rejection_explanation_ratio: 0.7   # probability of explaining a user rejection
+rec_explanation_ratio:       0.5   # probability of explaining a recommendation
+short_reply_ratio:           0.2   # probability of a short (2–5 word) user reply
+bot_short_followup_ratio:    0.4   # probability of a short (1–5 word) bot follow-up
+
+
+# ── User profile builder ──────────────────────────────────────
+rating_threshold: 3    # interactions with rating > threshold counted as "liked"
+short_term_days:  30   # number of recent days that define the short-term window
+
+
+# ── Output ────────────────────────────────────────────────────
+name_bot:           Bot
+name_user:          User
+annotation:         False
+outputs_folder:     chats/
+show_profile_note:  False
+show_chit_chat_tag: False
+show_item_id:       False   # set True to append (item_id) after recommended titles

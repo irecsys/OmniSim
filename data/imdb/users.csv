@@ -1,0 +1,21 @@
+user_id,birthyear,gender,nationality,profession
+u1,1990,Male,South Korea,artist
+u2,1987,Male,Canada,designer
+u3,1982,Female,Japan,manager
+u4,1991,Female,United States,manager
+u5,1996,Male,France,lawyer
+u6,1978,Male,Australia,writer
+u7,1998,Female,Australia,designer
+u8,1982,Female,Canada,student
+u9,1974,Male,Japan,researcher
+u10,1978,Female,South Korea,lawyer
+u11,1981,Male,Canada,researcher
+u12,1985,Male,United States,teacher
+u13,1974,Male,India,writer
+u14,1972,Female,India,writer
+u15,1984,Female,Japan,engineer
+u16,1993,Male,United Kingdom,teacher
+u17,1979,Female,Germany,researcher
+u18,1988,Male,Brazil,designer
+u19,1995,Female,United States,writer
+u20,1983,Male,France,engineer

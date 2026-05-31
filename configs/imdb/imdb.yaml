@@ -1,0 +1,93 @@
+# ============================================================
+# imdb.yaml — OmniSim config for the IMDB movie dataset
+#
+# Overrides system.yaml defaults.
+# See configs/system/system.yaml for the full parameter list
+# and documentation on every option.
+# ============================================================
+
+
+# ── Elasticsearch index ───────────────────────────────────────
+es_index: imdb-2025
+
+
+# ── Dataset ───────────────────────────────────────────────────
+dataset: imdb
+file_items:        items.csv           # item metadata (required)
+file_users:        users.csv           # user demographics (optional — enables personalisation)
+file_interactions: interactions.csv    # user–item ratings  (optional — enables hybrid scoring)
+
+# Column name mapping — must match the CSV headers exactly.
+col_userid:   user_id
+col_itemid:   imdb_id
+col_rating:   vote_average
+col_title:    title
+col_category: genres
+col_details:  overview
+
+
+# ── Embedding configuration ───────────────────────────────────
+# Fields concatenated to form the item text before encoding.
+embedding_fields: ["genres", "title", "overview", "release_year",
+                   "original_language", "production_countries",
+                   "spoken_languages", "vote_average"]
+
+# Column in items.csv that stores pre-computed embedding vectors.
+# Set to null to recompute embeddings at index-build time.
+precomputed_embedding_col: embedding_vector
+
+
+# ── BM25 field (paper Eq. 5) ──────────────────────────────────
+# Per Eq. 5, BM25 scores the query against ONE aggregated "details" field
+# (M_i,d = concatenation of all item attributes), built automatically at
+# index time as `bm25_details` from `embedding_fields` above.
+# Override the field name here only if you indexed it under a different name.
+bm25_details_field: bm25_details
+
+
+# ── Item attributes ───────────────────────────────────────────
+# Attributes fetched from ES and surfaced to the simulated agents.
+# Keys must match field names in the ES index.
+default_attributes: ["adult", "original_language", "release_year", "spoken_languages"]
+
+item_attributes:
+  adult:                "whether the movie is for adults only"
+  genres:               "genre"
+  original_language:    "original language"
+  production_companies: "production companies"
+  production_countries: "country of origin"
+  spoken_languages:     "spoken languages"
+  vote_average:         "rating"
+  release_year:         "year of movie release"
+  director:             "director"
+  cast:                 "cast"
+  runtime:              "runtime"
+  plot:                 "plot"
+  tone:                 "tone"
+  setting:              "setting"
+  era:                  "era"
+  awards:               "awards"
+  based_on:             "source material"
+  sequel:               "sequel or franchise"
+  audience:             "target audience"
+
+
+# ── Simulation roles ──────────────────────────────────────────
+# Injected into LLM prompts to give agents a domain-specific persona.
+role_user: movie seeker
+role_bot:  movie recommender
+
+
+# ── Input files ───────────────────────────────────────────────
+# Uncomment/set the strategies you want to run simultaneously.
+#
+# Strategy 1 (user_item_pairs): one conversation per (user, item) pair.
+input_pairs_file: configs/imdb/inputs/test_pairs.csv
+# Strategy 2 (item_list): N conversations per item (random or sampled users).
+input_items_file: ~
+# Strategy 3 (user_guest): N conversations per user with random items.
+input_users_file: ~
+
+chats_per_entry: 3    # conversations generated per input entry
+chats_per_user:  10   # used by user_guest strategy (20 users × 10 = 200 conversations)
+num_workers:     8    # parallel worker threads
