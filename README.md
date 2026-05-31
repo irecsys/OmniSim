@@ -1,4 +1,4 @@
-# OmniSim — Conversational Recommendation Dialogue Simulator
+# OmniSim: Conversational Recommendation Dialogue Simulator
 
 
 OmniSim generates realistic, personalised, multi-turn conversational recommendation dialogues from item metadata alone.  It combines LLM-based generation with Elasticsearch-grounded retrieval to mitigate hallucination and produces human-level lexical diversity across any item domain (movies, fashion, e-commerce, …).
