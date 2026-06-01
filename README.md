@@ -7,6 +7,8 @@ OmniSim generates realistic, personalised, multi-turn conversational recommendat
 
 **GitHub:** https://github.com/irecsys/OmniSim
 
+**Demo:" http://34.72.93.183/ (only available til June 14, 2026)
+
 ![OmniSim Design](img/design.jpg)
 
 ---
