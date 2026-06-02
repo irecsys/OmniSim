@@ -2,6 +2,7 @@
 
 ![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+[![ACM UMAP Digital Library](https://img.shields.io/badge/ACM%20UMAP-0085CA?logo=acm&logoColor=fff&style=flat)](https://dl.acm.org/doi/10.1145/3774935.3812730)
 
 OmniSim generates realistic, personalised, multi-turn conversational recommendation dialogues from item metadata alone.  It combines LLM-based generation with Elasticsearch-grounded retrieval to mitigate hallucination and produces human-level lexical diversity across any item domain (movies, fashion, e-commerce, …).
 
