@@ -1,0 +1,113 @@
+# Offline regression guard: pytest + the injection-mode fixture replay with
+# the strict equivalence verdict. No secrets, no API keys, no network calls besides package installation.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # explicit `bash` → GitHub runs `bash --noprofile --norc -eo pipefail {0}`: a failing command on the left
+    # of `| tee` fails the step (the implicit default shell is `bash -e {0}`, without pipefail)
+    shell: bash
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04          # pinned: the environment this workflow was verified on (sqlite 3.45.1)
+    timeout-minutes: 45
+    env:
+      # same BLAS settings as the local acceptance runs (verified byte-identical to the local baseline)
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_CORETYPE: Haswell
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # v6, not v7: v7 pointed at a 3-day-old commit on 2026-10-24; actions must be released >= 2 weeks
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Environment (for comparison with the local machine)
+        run: |
+          pip freeze
+          python -c "import numpy; numpy.show_config()"
+          python -c "import sqlite3; print('sqlite', sqlite3.sqlite_version)"
+          lscpu | grep -E 'Model name|^CPU\(s\)'
+          grep -o -w -E 'avx512f|avx2|fma' /proc/cpuinfo | sort | uniq -c
+
+      - name: Unpack hm.csv
+        run: |
+          unzip -o data/hm/hm.zip -d data/hm/
+          echo "998e43f6c093b7c982787b858fc7add1f572a738deb854dc6b3e0832e786935d  data/hm/hm.csv" | sha256sum -c -
+
+      - name: Build the local indexes (precomputed vectors, no API) and check their content
+        run: |
+          python scripts/build_local_index.py --config "configs/system/system.yaml configs/imdb/imdb.yaml"
+          python scripts/build_local_index.py --config "configs/system/system.yaml configs/hm/hm.yaml"
+          echo "file sha256 (report only: items.db records the writer's SQLite version, so its bytes differ by version):"
+          sha256sum index/*/items.db index/*/vectors/text.npy
+          python scripts/index_digest.py --check tests/ci/index_digest.txt index/imdb index/hm
+
+      - name: pytest
+        run: |
+          python -m pytest -q -rs -p no:cacheprovider | tee pytest.txt
+          python scripts/ci_check_skips.py pytest.txt
+
+      - name: Injection-mode replay (strict) — vector
+        run: |
+          mkdir -p ci_out
+          python legacy_es_equivalence/replay_fixtures.py --part vector --entry library --out ci_out/inj_vector_library.json | tee ci_out/inj_vector_library.stdout
+          python legacy_es_equivalence/replay_fixtures.py --part vector --entry utils --out ci_out/inj_vector_utils.json | tee ci_out/inj_vector_utils.stdout
+
+      - name: Injection-mode replay (strict) — full
+        run: |
+          python legacy_es_equivalence/replay_fixtures.py --part full --entry library --out ci_out/inj_full_library.json | tee ci_out/inj_full_library.stdout
+          python legacy_es_equivalence/replay_fixtures.py --part full --entry utils --out ci_out/inj_full_utils.json | tee ci_out/inj_full_utils.stdout
+
+      - name: Injection-mode replay (strict) — w2
+        run: |
+          python legacy_es_equivalence/replay_fixtures.py --part w2 --entry library | tee ci_out/inj_w2_library.stdout
+          python legacy_es_equivalence/replay_fixtures.py --part w2 --entry utils | tee ci_out/inj_w2_utils.stdout
+
+      - name: All six replays ran and passed
+        run: |
+          n=0
+          for part in vector full w2; do
+            for entry in library utils; do
+              f=ci_out/inj_${part}_${entry}.stdout
+              last=$(tail -n 1 "$f")
+              echo "$f: $last"
+              [ "$last" = "PASS" ] && n=$((n+1))
+            done
+          done
+          echo "replays passed: $n/6"
+          [ "$n" -eq 6 ]
+
+      - name: Upload outputs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-outputs
+          path: |
+            pytest.txt
+            ci_out/
+          retention-days: 7

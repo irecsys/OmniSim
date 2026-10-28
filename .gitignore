@@ -16,13 +16,16 @@ env/
 # Generated outputs (large / ephemeral)
 chats/
 logs/
+results/
 compare_result.csv
 *.csv.bak
+data/hm/hm_img.zip
 
-# Raw dataset files (large; download via scripts/convert_redial.py)
+# Raw dataset files (large; the ReDial files are downloaded from the ReDial website, scripts/convert_redial.py only converts them)
 data/redial/train_data.jsonl
 data/redial/test_data.jsonl
 data/redial/redial_dataset.zip
+!data/hm/hm.zip
 data/imdb/IEEDATA/
 data/hm/hm.csv
 
@@ -37,6 +40,10 @@ data/**/.profile_hash.json
 *.swo
 
 # Local tool settings
-.claude/
+.claude/*
 .codex
 .agents/
+UI/
+
+# Local retrieval index (v2) — rebuilt from data/ by scripts/build_local_index.py
+index/

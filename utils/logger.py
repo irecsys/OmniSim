@@ -1,9 +1,9 @@
 # @Time   : January, 2023
 # @Author : Dr. Yong Zheng
-# @Email  : yzheng66@iit.edu
+# @Email  : yzheng66@illinoistech.edu
 
 """
-mopo.utils.logger
+utils.logger
 ###############################
 """
 
@@ -71,7 +71,9 @@ def init_logger(config):
     dir_name = os.path.dirname(LOGROOT)
     ensure_dir(dir_name)
 
-    log_filename = '{}-{}.log'.format(config['model'], get_local_time())
+    # file name prefix: the chat model (config['model'] never existed, so it was 'None-…'); unsafe characters → '_'
+    model = re.sub(r'[^\w.-]', '_', str(config.get('chat_model') or 'omnisim'))
+    log_filename = '{}-{}.log'.format(model, get_local_time())
 
     log_filepath = os.path.join(LOGROOT, log_filename)
 
@@ -120,8 +122,6 @@ def init_logger(config):
     logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("elasticsearch").setLevel(logging.WARNING)
-    logging.getLogger("elasticsearch.transport").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)  
     # -------------------------------
 
@@ -132,12 +132,7 @@ def init_logger(config):
         "azure",
         "azure.core.pipeline.policies.http_logging_policy",
         "httpx",
-        "urllib3",
-        "elasticsearch",
-        "elasticsearch.client",
-        "elasticsearch.transport",
-        "elastic_transport",
-        "elastic_transport.transport"
+        "urllib3"
     ]
     for lname in noisy_loggers:
         log = logging.getLogger(lname)

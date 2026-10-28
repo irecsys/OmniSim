@@ -7,18 +7,18 @@ Strategy:
   2. Parse the target simulated folder(s) to get the reference distribution.
   3. Use histogram-matched weighted sampling so the sampled real conversations
      have a similar num_turns (and optionally rec_attempts) distribution.
-  4. Convert and write the sampled conversations in SimuConv TXT format.
+  4. Convert and write the sampled conversations in OmniSim TXT format.
 
 Usage:
     # Match distribution of one sim folder
     python scripts/sample_baseline.py \
-        --sim chats/imdb/adaptive/user_item_pairs/20260321074527
+        --sim chats/imdb/adaptive/user_item_pairs/<run_timestamp>
 
     # Match combined distribution of all three modes (recommended)
     python scripts/sample_baseline.py \
-        --sim chats/imdb/free/user_item_pairs/20260321045333 \
-              chats/imdb/static/user_item_pairs/20260321060337 \
-              chats/imdb/adaptive/user_item_pairs/20260321074527 \
+        --sim chats/imdb/free/user_item_pairs/<run_timestamp> \
+              chats/imdb/static/user_item_pairs/<run_timestamp> \
+              chats/imdb/adaptive/user_item_pairs/<run_timestamp> \
         --n 200 \
         --output chats/redial/real
 """
@@ -27,11 +27,13 @@ import os
 import re
 import json
 import csv
-import random
 import argparse
 import datetime
 import numpy as np
 import pandas as pd
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # run as a script
+from utils.dialogue_files import is_tmp_dialogue
 
 
 # ---------------------------------------------------------------------------
@@ -61,11 +63,17 @@ def _load_movies(csv_path: str) -> dict:
     return movies
 
 
+_YEAR_SUFFIX_RE = re.compile(r'\s*\(\d{4}\)\s*$')    # " (1997)" at the end of a ReDial movie name
+
+
 def _replace_refs(text: str, mentions: dict, movies: dict) -> str:
     def rep(m):
         mid = m.group(1)
         if mid in mentions:
-            return f'"{re.sub(r"\\s*\\(\\d{{4}}\\)\\s*$", "", mentions[mid]).strip()}"'
+            # The regex used to sit inside the f-string expression (a SyntaxError before
+            # Python 3.12, and on 3.12 a raw string with doubled backslashes that never matched)
+            title = _YEAR_SUFFIX_RE.sub('', mentions[mid]).strip()
+            return f'"{title}"'
         if mid in movies:
             return f'"{movies[mid]["title"]}"'
         return f'movie#{mid}'
@@ -146,7 +154,7 @@ def _parse_sim_folders(folders: list[str]) -> pd.DataFrame:
     rows = []
     for folder in folders:
         for fname in os.listdir(folder):
-            if not fname.endswith('.txt'):
+            if not fname.endswith('.txt') or is_tmp_dialogue(fname):
                 continue
             m = _SIM_FNAME_RE.match(fname)
             if m:
@@ -202,7 +210,7 @@ def _matched_sample(pool_df: pd.DataFrame, ref_df: pd.DataFrame,
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description='Sample ReDial redial conversations to match simulated distribution'
+        description='Sample ReDial conversations to match simulated distribution'
     )
     parser.add_argument(
         '--sim', nargs='+', required=True,

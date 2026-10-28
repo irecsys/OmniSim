@@ -8,13 +8,14 @@ Entry point:  ``run_simulation(config_file_list, ...)``
 Workflow
 --------
 1. Load and merge configuration (system defaults + dataset overrides).
-2. Connect to Elasticsearch and verify the index exists.
+2. Open the local retrieval index (built from the items CSV if missing).
 3. Load dataset (items, users, interactions) and build/restore user profiles.
 4. Dispatch conversation generation across strategy queues
    (user_item_pairs / item_list / user_guest / random) using a thread pool.
 5. Write completed dialogues to ``chats/{dataset}/{mode}/{strategy}/{run_ts}/``.
 """
 
+import io
 import warnings
 import time
 import os
@@ -24,15 +25,13 @@ import random
 import traceback
 import threading
 import pandas as pd
-import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from logging import getLogger
 from datetime import datetime
 from openai import AuthenticationError, APIConnectionError, OpenAIError, RateLimitError
-from elasticsearch import Elasticsearch
-from elasticsearch import AuthenticationException, AuthorizationException, ConnectionError, TransportError
 
+from utils import llm_calls
 from utils.logger import init_logger
 from utils.utils import init_seed, get_openai_clients
 from utils.configurator import Config
@@ -123,33 +122,93 @@ SIMULATION_FUNCS = {
 }
 
 
+# ERROR logged when a quota error (llm_calls.is_quota_exhausted) stops the run, per stop reason
+_QUOTA_LOG = {
+    llm_calls.THETA_403_STOP:
+        "ThetaEdgeCloud returned HTTP 403 (provider {provider}, {task}): treated as the quota being used up. "
+        "This may be only the 10-minute window (100 requests per 10 minutes, back after a few minutes) or the daily "
+        "quota. No further conversation is started in this run (remaining tasks and later strategies are skipped, see "
+        "the run summary). Limit the request rate with scripts/run_rate_limited.py or use fewer --num-workers, then "
+        "rerun the unfinished tasks. Error: {error}",
+    llm_calls.OPENAI_DAILY_STOP:
+        "Daily rate limit reached (RateLimitError, provider {provider}, {task}): the per-day limit is used up and resets "
+        "the next day. No further conversation is started in this run (remaining tasks and later strategies are "
+        "skipped, see the run summary). Rerun the unfinished tasks tomorrow or with another API key. Error: {error}",
+    llm_calls.OPENAI_QUOTA_STOP:
+        "insufficient_quota (RateLimitError, provider {provider}, {task}): the account's quota is used up and does not "
+        "come back by itself. No further conversation is started in this run (remaining tasks and later strategies "
+        "are skipped, see the run summary). Check the account's quota / billing, then rerun the unfinished tasks. "
+        "Error: {error}",
+}
+
+
 def _run_parallel(sim_func, tasks, num_workers, chat_folder, logger, total):
     """Run simulation tasks in parallel using a thread pool.
     tasks: list of (identifier, params_dict)
     """
     counter = [0]
     lock = threading.Lock()
-    abort_flag = threading.Event()
+    abort_flag = threading.Event()             # used only without a run summary (_run_parallel called directly)
+    stop_reason = [None]
+    summary = llm_calls.active_run()           # run summary (None when called outside run_simulation)
+    strategy = tasks[0][1]['config'].get('generation_strategy') if tasks else None
+    if summary is not None:
+        summary.dispatched(strategy, len(tasks))
+
+    def _stop_if_fail(e):
+        if summary is not None and summary.on_llm_error == 'fail' and llm_calls.is_llm_error(e):
+            if not summary.stop.is_set():
+                logger.error(f"on_llm_error: fail — a conversation stopped on an LLM / embedding error; "
+                             f"no further conversation is started")
+            summary.stop.set()
+
+    def _dropped(identifier, e):
+        # conversations stopped inside simulate_* are merged by llm_calls.conversation; count the rest here
+        if summary is not None and not getattr(e, 'omnisim_merged', False):
+            summary.dropped_outside(strategy, identifier, e)
+
+    def _dispatch_stopped():
+        """Why no new task may start (a quota error, llm_calls.is_quota_exhausted): for the whole run when there is a run summary,
+        so later strategies are skipped too (as with on_llm_error: fail); else for this call only."""
+        if summary is not None:
+            return (summary.dispatch_stop or {}).get('reason')
+        return stop_reason[0] if abort_flag.is_set() else None
+
+    def _stop_dispatch(reason, identifier, provider):
+        stop_reason[0] = reason
+        abort_flag.set()
+        if summary is not None:
+            summary.stop_dispatch(reason, identifier, provider)
 
     def _run_one(identifier, params):
-        if abort_flag.is_set():
+        reason = _dispatch_stopped()
+        if reason:
+            if summary is not None:
+                summary.skipped(strategy, reason)
+            return
+        if summary is not None and summary.stop.is_set():      # on_llm_error: fail
+            summary.skipped(strategy, 'on_llm_error=fail')
             return
         try:
             sim_func(**params)
-        except RateLimitError as e:
-            if 'per day' in str(e).lower() or 'rpd' in str(e).lower():
-                logger.error(f"Daily rate limit reached — stopping all remaining tasks: {e}")
-                abort_flag.set()
-            else:
-                logger.warning(f"Error processing {identifier}: {e}")
-            if 'target_item_id' in params:
-                _cleanup_tmp_file(chat_folder, params['target_item_id'])
         except BaseException as e:
-            msg = f"Error processing {identifier}: {e}\n{traceback.format_exc()}"
-            logger.warning(msg)
-            print(msg, flush=True)
+            if isinstance(e, RateLimitError):
+                logger.warning(f"Error processing {identifier}: {llm_calls.sanitize(e)}")
+            else:
+                msg = llm_calls.mask_secrets(f"Error processing {identifier}: {e}\n{traceback.format_exc()}")
+                logger.warning(msg)
+                print(msg, flush=True)
             if 'target_item_id' in params:
                 _cleanup_tmp_file(chat_folder, params['target_item_id'])
+            _dropped(identifier, e)
+            _stop_if_fail(e)
+            # a quota / rate-limit error of the provider that made the call stops the whole run
+            provider = llm_calls.provider_of(e, params['config'])
+            reason = llm_calls.is_quota_exhausted(e, provider)
+            fail_mode_stop = summary is not None and summary.stop.is_set()   # on_llm_error: fail stops on its own
+            if reason and not _dispatch_stopped() and not fail_mode_stop:
+                logger.error(_QUOTA_LOG[reason].format(provider=provider, task=identifier, error=llm_calls.sanitize(e)))
+                _stop_dispatch(reason, identifier, provider)
         with lock:
             counter[0] += 1
             if counter[0] % 10 == 0:
@@ -163,10 +222,96 @@ def _run_parallel(sim_func, tasks, num_workers, chat_folder, logger, total):
     return counter[0]
 
 
+def _open_local_backend(config, config_file_list, logger):
+    """Load the local index; build it first if it is missing (never calling the embedding API),
+    then check that it was built with the config's embedding provider/model."""
+    from utils.retrieval.backend import LocalBackend
+    from utils.retrieval.local_index import (EmbeddingsNeeded, build_local_index, check_embedding_space,
+                                             index_dir_for, load_config)
+
+    index_dir = index_dir_for(config)
+    if not os.path.exists(os.path.join(index_dir, 'meta.json')):
+        logger.warning(f"Local index '{index_dir}' not found — building it now ...")
+        files = ' '.join(config_file_list or [])
+        try:
+            build_local_index(load_config(config_file_list or []), index_dir, config_files=config_file_list,
+                              max_embed_items=0)
+        except EmbeddingsNeeded as e:
+            raise RuntimeError(
+                f"Could not build the local index '{index_dir}' for dataset '{config['dataset']}': {e}.\n"
+                "The items CSV has no precomputed embedding column (precomputed_embedding_col), so the vectors "
+                "must be computed with the paid embedding API, and the automatic build never does that. "
+                "Build the index explicitly (computed vectors are cached in the index directory; the CSV is "
+                "not modified):\n"
+                f"  python run.py --config \"{files}\" --build-index\n"
+                "To see how many items would be embedded first:\n"
+                f"  python scripts/build_local_index.py --config \"{files}\" --dry-run") from e
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not build the local index '{index_dir}' for dataset '{config['dataset']}': {e}") from e
+        logger.info(f"Local index '{index_dir}' built.")
+    backend = LocalBackend(index_dir)
+    check_embedding_space(backend.meta, config, index_dir, logger)
+    logger.info(f"Opened local index '{index_dir}' ({backend.n} items).")
+    return backend
+
+
+def check_retrieval_backend(config, logger):
+    """v2 has only the local index. A leftover `retrieval_backend` key: absent → local; 'local' →
+    accepted with a deprecation warning; 'elasticsearch' (removed in v2) or anything else → error."""
+    value = config.get('retrieval_backend')
+    if value is None:
+        return
+    if value == 'local':
+        logger.warning("Config key 'retrieval_backend' is deprecated: OmniSim v2 always uses the local index. "
+                       "Remove the key from your config.")
+        return
+    if value == 'elasticsearch':
+        raise ValueError("Config error: retrieval_backend 'elasticsearch' is no longer supported. OmniSim v2 removed "
+                         "Elasticsearch and uses the built-in local index; remove the key from your config, "
+                         "or check out the v1.x branch (or tag v1.0) for the Elasticsearch version.")
+    raise ValueError(f"Config error: 'retrieval_backend' must be 'local' (deprecated, can be removed), got {value!r}.")
+
+
+def _sample_guest_items(backend, config, itemid, size):
+    """user_guest: up to `size` random items → (item rows, item_pool of id strings)."""
+    from utils.retrieval import sampling
+    rows = sampling.sample_items(backend, size)
+    return rows, [str(r.get(itemid)) for r in rows]
+
+
 def run_simulation(config_file_list=None, mode_override=None, strategies_override=None,
                    num_workers_override=None, chats_per_entry_override=None, pairs_file_override=None):
-    """ entry of the running. """
+    """ entry of the running.
 
+    Returns the run summary (dict; 'exit_code' is run.py's exit code: 0, or 3 after any LLM / embedding error),
+    which is also written to {outputs_folder}/{dataset}/{mode}/run_summary_{run_ts}.json.
+    """
+    llm_calls.deactivate_run()
+    try:
+        _run_simulation(config_file_list, mode_override, strategies_override,
+                        num_workers_override, chats_per_entry_override, pairs_file_override)
+    except llm_calls.RunAborted as e:
+        getLogger().error(f"Run stopped before any conversation was dispatched: {e}")
+        llm_calls.active_run().aborted(e.stage, e.error)
+    except BaseException as e:
+        summary = llm_calls.active_run()
+        if summary is not None:
+            summary.crashed(e)
+            _finish_run(summary)
+        raise
+    return _finish_run(llm_calls.active_run())
+
+
+def _finish_run(summary):
+    try:
+        return summary.write()
+    finally:
+        llm_calls.deactivate_run()
+
+
+def _run_simulation(config_file_list, mode_override, strategies_override,
+                    num_workers_override, chats_per_entry_override, pairs_file_override):
     # load configurations
     config = Config(config_file_list=config_file_list)
 
@@ -185,6 +330,9 @@ def run_simulation(config_file_list=None, mode_override=None, strategies_overrid
     log_filepath = init_logger(config)
     logger = getLogger()
     filename = os.path.splitext(log_filepath)[0]
+    summary = llm_calls.RunSummary(config, config_file_list)
+    llm_calls.activate_run(summary)
+    llm_calls.check_on_llm_error(config)
 
     # Validate hybrid scoring parameters
     for param in ('weight_es_score', 'weight_user_taste_short'):
@@ -196,6 +344,7 @@ def run_simulation(config_file_list=None, mode_override=None, strategies_overrid
                 raise ValueError(f"Config error: '{param}' must be a number between 0 and 1, got '{config[param]}'. Please reconfigure.")
             if not (0.0 <= val <= 1.0):
                 raise ValueError(f"Config error: '{param}' must be between 0 and 1, got {val}. Please reconfigure.")
+    check_retrieval_backend(config, logger)
 
     logger.info(config)
     logger.info(config['library_name'] + ' version ' + str(config['library_version']))
@@ -209,66 +358,33 @@ def run_simulation(config_file_list=None, mode_override=None, strategies_overrid
     client_chat, client_embeddings = get_openai_clients(config)
     # testing OpenAI clients
     try:
-        response = client_chat.chat.completions.create(
+        response = llm_calls.chat(client_chat, 'startup_check',
             model=config["chat_model"],
             messages=[{"role": "user", "content": "Hello!"}],
         )
         logger.info("Connected to OpenAI.")
-    except AuthenticationError:
+    except AuthenticationError as e:
         logger.error("Authentication failed: check your API key or endpoint.")
-    except APIConnectionError:
+        llm_calls.startup_failed(e)
+    except APIConnectionError as e:
         logger.error("Connection error: unable to reach Azure OpenAI service.")
+        llm_calls.startup_failed(e)
     except OpenAIError as e:
-        logger.error(f"OpenAI API error: {e}")
+        logger.error(f"OpenAI API error: {llm_calls.sanitize(e)}")
+        llm_calls.startup_failed(e)
     except Exception as e:
-        logger.error(f"Unexpected error in OpenAI chat mode: {e}")
+        logger.error(f"Unexpected error in OpenAI chat mode: {llm_calls.sanitize(e)}")
+        llm_calls.startup_failed(e)
 
-    # create ElasticSearch instance
-    username = os.getenv("ES_USER")
-    pwd = os.getenv("ES_PWD")
-    ES_HOST = config["es_host"]
-    ES_INDEX = config["es_index"]
-    
-    # For local Elasticsearch, disable SSL verification completely
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    
-    if username and pwd:
-        es = Elasticsearch(
-            ES_HOST, 
-            basic_auth=(username, pwd), 
-            verify_certs=False,
-            ssl_show_warn=False
-        )
-    else:
-        es = Elasticsearch(ES_HOST, verify_certs=False, ssl_show_warn=False)
-
-    try:
-        # Check existence of your specific index (requires only read access on that index)
-        if es.indices.exists(index=ES_INDEX):
-            logger.info(f"Connected to Elasticsearch (index '{ES_INDEX}' is accessible).")
-        else:
-            logger.warning(f"Index '{ES_INDEX}' not found — building it now ...")
-            from scripts.build_es_index import build_index as _build_es_index
-            sys_cfg = 'configs/system/system.yaml'
-            build_cfgs = [sys_cfg] + [c for c in (config_file_list or []) if c != sys_cfg]
-            _build_es_index(build_cfgs)
-            logger.info(f"Index '{ES_INDEX}' built successfully.")
-    except AuthenticationException:
-        logger.error("Authentication failed: check username/password.")
-    except AuthorizationException:
-        logger.error("Not authorized: check user permissions.")
-    except ConnectionError:
-        logger.error("Connection error: cannot reach Elasticsearch host.")
-    except TransportError as e:
-        logger.error(f"Transport error: {e.info}")
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}\n{traceback.format_exc()}")
+    # open the retrieval backend
+    backend = _open_local_backend(config, config_file_list, logger)
 
     # Auto-build or reload user_profiles.csv when source files changed
     user_profiles = {}
     data_path = os.path.join(config.get('data_path', 'data'), config['dataset'])
     user_profiles_path = os.path.join(data_path, 'user_profiles.csv')
     try:
+        profiles_in_memory = None
         if _needs_profile_rebuild(config, data_path):
             # Check if at least one source file exists before attempting build
             has_source = any(
@@ -279,20 +395,35 @@ def run_simulation(config_file_list=None, mode_override=None, strategies_overrid
             if has_source:
                 logger.info("Building user_profiles.csv (source files new or changed)...")
                 from utils.user_profile_builder import build_user_profiles
-                build_user_profiles(config_file_list)
-                _save_profile_hashes(config, data_path)
-                logger.info("user_profiles.csv built and hashes saved.")
+                profiles_df, failures = build_user_profiles(config_file_list) or (None, [])
+                if failures:
+                    # Do not cache profiles with failed LLM calls (the next run would reuse them silently)
+                    users = sorted({str(u) for u, _, _ in failures})
+                    logger.warning(f"User profiles: {len(failures)} LLM call(s) failed for users {users}; "
+                                   f"user_profiles.csv and .profile_hash.json were not updated, this run uses "
+                                   f"the incomplete profiles in memory")
+                    profiles_in_memory = pd.read_csv(io.StringIO(profiles_df.to_csv(index=False)))  # as if read back
+                    summary.profile_result(True, failures, False)
+                else:
+                    _save_profile_hashes(config, data_path)
+                    logger.info("user_profiles.csv built and hashes saved.")
+                    summary.profile_result(True, [], profiles_df is not None)
             else:
                 logger.info("No user/interaction files found — skipping profile build.")
 
-        if os.path.exists(user_profiles_path):
+        if profiles_in_memory is not None:
+            user_profiles = profiles_in_memory.set_index('userid').to_dict('index')
+            logger.info(f"Using in-memory user profiles for {len(user_profiles)} users")
+        elif os.path.exists(user_profiles_path):
             profiles_df = pd.read_csv(user_profiles_path)
             user_profiles = profiles_df.set_index('userid').to_dict('index')
             logger.info(f"Loaded user profiles for {len(user_profiles)} users")
         else:
             logger.info("No user_profiles.csv found, proceeding without user profiles")
+    except llm_calls.LLMCallFailed as e:
+        raise llm_calls.RunAborted('profiles', e) from e     # on_llm_error: fail
     except Exception as e:
-        logger.warning(f"Error loading user profiles: {e}")
+        logger.warning(f"Error loading user profiles: {llm_calls.sanitize(e)}")
 
     # run simulation with different strategies
     # Set a run-level timestamp so all conversations in this run go to the same subfolder
@@ -326,9 +457,11 @@ def run_simulation(config_file_list=None, mode_override=None, strategies_overrid
     num_workers = int(config.get('num_workers') or 4)
     logger.info(f'Using {num_workers} parallel workers')
 
+    chat_folders = {}   # strategy -> its output folder, for the closing log lines only
     for generation_strategy in strategies_to_run:
         config['generation_strategy'] = generation_strategy
         chat_folder = os.path.join(config['outputs_folder'], config['dataset'], config['mode_refinement'], generation_strategy, run_timestamp) + os.sep
+        chat_folders[generation_strategy] = chat_folder
         logger.info(f'--- Running strategy: {generation_strategy} ---')
 
         if generation_strategy == 'items':
@@ -346,7 +479,7 @@ def run_simulation(config_file_list=None, mode_override=None, strategies_overrid
                 params = {
                     "config": config, "dataset": dataset, "user_id": None,
                     "target_item_id": sample_item_id, "client_chat": client_chat,
-                    "client_embeddings": client_embeddings, "es": es, "user_profiles": user_profiles
+                    "client_embeddings": client_embeddings, "backend": backend, "user_profiles": user_profiles
                 }
                 tasks.append((f"item {sample_item_id}", params))
             count = _run_parallel(sim_func, tasks, num_workers, chat_folder, logger, num_chats)
@@ -378,7 +511,7 @@ def run_simulation(config_file_list=None, mode_override=None, strategies_overrid
                         params = {
                             "config": config, "dataset": dataset, "user_id": user_id,
                             "target_item_id": item_id, "client_chat": client_chat,
-                            "client_embeddings": client_embeddings, "es": es, "user_profiles": user_profiles
+                            "client_embeddings": client_embeddings, "backend": backend, "user_profiles": user_profiles
                         }
                         tasks.append((f"item {item_id}", params))
                 count = _run_parallel(sim_func, tasks, num_workers, chat_folder, logger, total)
@@ -402,14 +535,14 @@ def run_simulation(config_file_list=None, mode_override=None, strategies_overrid
                         params = {
                             "config": config, "dataset": dataset, "user_id": user_id,
                             "target_item_id": item_id, "client_chat": client_chat,
-                            "client_embeddings": client_embeddings, "es": es, "user_profiles": user_profiles
+                            "client_embeddings": client_embeddings, "backend": backend, "user_profiles": user_profiles
                         }
                         tasks.append((f"user {user_id} item {item_id}", params))
                 count = _run_parallel(sim_func, tasks, num_workers, chat_folder, logger, total)
                 logger.info(f'Done. Generated {count} user-item pair conversations.')
 
         elif generation_strategy == 'user_guest':
-            # Strategy 4: Users + items sampled from ES
+            # Strategy 4: Users + items sampled from the local index
             if dataset.df_users is None or dataset.df_users.empty:
                 logger.error("user_guest strategy requires file_users to be set in config.")
                 continue
@@ -432,22 +565,16 @@ def run_simulation(config_file_list=None, mode_override=None, strategies_overrid
                 demo_profiles[uid] = {'user_demographic': _build_demographic(u_row), 'user_likes_long': '', 'user_likes_short': ''}
 
             try:
-                es_resp = es.search(index=ES_INDEX, body={
-                    "query": {"function_score": {"query": {"match_all": {}}, "random_score": {}}},
-                    "size": min(total * 3, 1000)
-                })
-                es_hits = es_resp['hits']['hits']
+                rows, item_pool = _sample_guest_items(backend, config, dataset.itemid, min(total * 3, 1000))
             except Exception as e:
-                logger.error(f"Failed to sample items from ES: {e}")
+                logger.error(f"Failed to sample items from the local backend: {e}")
                 continue
 
-            if not es_hits:
-                logger.error("No items found in Elasticsearch index.")
+            if not rows:
+                logger.error("No items found in the local index.")
                 continue
 
-            es_rows = [hit['_source'] for hit in es_hits]
-            dataset.df_items = pd.DataFrame(es_rows)
-            item_pool = [str(hit['_source'].get(dataset.itemid, hit['_id'])) for hit in es_hits]
+            dataset.df_items = pd.DataFrame(rows)
 
             tasks = []
             for user_id in user_ids:
@@ -456,13 +583,15 @@ def run_simulation(config_file_list=None, mode_override=None, strategies_overrid
                     params = {
                         "config": config, "dataset": dataset, "user_id": user_id,
                         "target_item_id": item_id, "client_chat": client_chat,
-                        "client_embeddings": client_embeddings, "es": es, "user_profiles": demo_profiles,
+                        "client_embeddings": client_embeddings, "backend": backend, "user_profiles": demo_profiles,
                     }
                     tasks.append((f"user {user_id} item {item_id}", params))
             count = _run_parallel(sim_func, tasks, num_workers, chat_folder, logger, total)
             logger.info(f'Done. Generated {count} user-guest conversations.')
     
-    logger.info(f'All simulated conversations have been saved to {chat_folder}')
-    logger.info('filename pattern is: {item_id}-{number_turns}-{rec_attempts}-{succeed}-{timestamp}.txt')
+    logger.info('Simulated conversations were saved to one folder per strategy:')
+    for generation_strategy, chat_folder in chat_folders.items():
+        logger.info(f'  {generation_strategy}: {chat_folder}')
+    logger.info('filename pattern is: {user_id}-{item_id}-{number_turns}-{rec_attempts}-{succeed}-{timestamp}.txt')
 
 

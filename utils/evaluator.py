@@ -20,6 +20,7 @@ import pandas as pd
 from utils.configurator import Config
 from utils.utils import get_openai_clients
 from utils.metrics import parse_filename
+from utils.dialogue_files import is_tmp_dialogue, split_fallback_line
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +156,10 @@ def evaluate_dialogue(dialogue: str, client_chat, model: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def evaluate_folder(config: Config, folder_path: str, output_csv: str | None = None):
+    """LLM-based evaluation of the conversation .txt files in folder_path (tmp files skipped), with the chat
+    client and chat_model from config: fluency, informativeness and coherence on a 1-5 scale, each with a
+    reason, plus overall_score and overall_quality. Prints a summary and returns a DataFrame with one row per
+    conversation, saved to output_csv if given; None if the folder does not exist or nothing was evaluated."""
     if not os.path.isdir(folder_path):
         print(f"Folder not found: {folder_path}")
         return
@@ -163,7 +168,7 @@ def evaluate_folder(config: Config, folder_path: str, output_csv: str | None = N
     model = config['chat_model']
 
     rows = []
-    files = sorted([f for f in os.listdir(folder_path) if f.endswith('.txt')])
+    files = sorted([f for f in os.listdir(folder_path) if f.endswith('.txt') and not is_tmp_dialogue(f)])
 
     print(f"\nEvaluating {len(files)} conversations in: {folder_path}")
     print(f"Model: {model}\n")
@@ -174,7 +179,9 @@ def evaluate_folder(config: Config, folder_path: str, output_csv: str | None = N
             continue
 
         fpath = os.path.join(folder_path, fname)
-        dialogue = read_dialogue(fpath)
+        # the <FALLBACK> line is not shown to the evaluator; its count goes into the 'fallbacks' column
+        dialogue, n_fallbacks = split_fallback_line(read_dialogue(fpath))
+        dialogue = dialogue.strip()
 
         try:
             result = evaluate_dialogue(dialogue, client_chat, model)
@@ -185,6 +192,7 @@ def evaluate_folder(config: Config, folder_path: str, output_csv: str | None = N
                 'succeed': parsed['succeed'],
                 'num_turns': parsed['num_turns'],
                 'rec_attempts': parsed['rec_attempts'],
+                'fallbacks': n_fallbacks,
                 'fluency': result['fluency']['score'],
                 'fluency_reason': result['fluency']['reason'],
                 'informativeness': result['informativeness']['score'],

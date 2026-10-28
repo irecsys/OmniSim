@@ -1,0 +1,190 @@
+{
+  "what": "v1 Elasticsearch retrieval behaviour, recorded for the v2 local-backend migration. NOT reproducible once ES is deleted (S7). See README.md.",
+  "written": "2026-10-23T03:17:17",
+  "written_at_commit": "bd8f961",
+  "elasticsearch": {
+    "version": "8.13.0",
+    "lucene_version": "9.10.0",
+    "build_hash": "09df99393193b2c53d92899662a8b8b3c55b45cd",
+    "url": "http://localhost:9200 (temporary instance, deleted in S7)",
+    "indices": {
+      "imdb-2025": {
+        "docs": 200,
+        "uuid": "WRrVw9xmRmmLTrPDh-bMuQ",
+        "creation_date": "2026-10-22T23:18:48",
+        "created_version": "8503000",
+        "number_of_shards": "1",
+        "embedding_mapping": {
+          "type": "dense_vector",
+          "dims": 1536,
+          "index": true,
+          "similarity": "cosine"
+        },
+        "analysis": "default (standard analyzer)"
+      },
+      "hm-2025": {
+        "docs": 3246,
+        "uuid": "6O4OqjDrSOCKucJGYROUkQ",
+        "creation_date": "2026-10-22T23:19:46",
+        "created_version": "8503000",
+        "number_of_shards": "1",
+        "embedding_mapping": {
+          "type": "dense_vector",
+          "dims": 1536,
+          "index": true,
+          "similarity": "cosine"
+        },
+        "analysis": "default (standard analyzer)"
+      }
+    }
+  },
+  "embedding": {
+    "provider": "azure",
+    "model": "text-embedding-3-small",
+    "dims": 1536,
+    "embeddings_endpoint": "https://conv.openai.azure.com/openai/deployments/text-embedding-3-small/embeddings?api-version=2023-05-15",
+    "embeddings_api_version_config": "2024-02-01",
+    "api_version_effective": "2024-02-01",
+    "note": "the api-version inside embeddings_endpoint (2023-05-15) never takes effect; the SDK appends /openai and sends default_query api-version (KNOWN_ISSUES #14). Item vectors come pre-computed in items.csv / hm.csv; only query vectors were embedded during phase A.",
+    "openai_sdk": "3.37.0"
+  },
+  "chat": {
+    "provider": "thetaedgecloud",
+    "model": "qwen3_8_flash",
+    "used_by": "phase A only (phase B / direct_call make no LLM calls)"
+  },
+  "w1_rule": {
+    "rule": "ES 8.13 stores a document vector as-is unless |‖v‖²−1| > 1e-4, with ‖v‖² accumulated in float32 sequentially over the dimensions; above the threshold it is normalised. Query vectors are always normalised. kNN _score = (1 + cos) / 2.",
+    "evidence": "tests/fixtures/es_norm_rule/{hm,imdb}.csv (scripts/verify_es_norm_rule.py, commit e58ff6a): H&M 451 raw / 2784 normalised / 11 indistinguishable, 0 rule mismatches; IMDB all within 1±1e-7 (gives no evidence for the rule)"
+  },
+  "grid": {
+    "lambda_phase_a": 0.3,
+    "tau_phase_a": 0.3,
+    "lambdas_replayed": [
+      0.3,
+      0.0,
+      1.0
+    ],
+    "tau_run": 0.0,
+    "tau_set": [
+      0.2,
+      0.3,
+      0.7143,
+      0.7365,
+      0.787
+    ],
+    "tau_quantiles_lambda0_max_base": {
+      "0.25": 0.7143,
+      "0.5": 0.7365,
+      "0.75": 0.787
+    },
+    "gate_true_share_lambda0_over_tau_set": 0.7,
+    "note": "gate_passed for any τ is derived from internal.max_base_score >= τ. At λ=1.0 max_base is 1.0 when the candidates have ≥ 2 distinct BM25 scores, else 0.0 — gate_passed carries no τ information there; compare ranking only."
+  },
+  "recording": {
+    "phase_a": {
+      "started": "2026-10-23T01:21:20",
+      "finished": "2026-10-23T02:46:27",
+      "conversations": 53,
+      "retrieval_calls": 116,
+      "theta_http_requests": 823,
+      "theta_budget": 2500,
+      "theta_rate_limit": "95 / 600 s",
+      "embedding_requests": 182,
+      "retrieval_cap_per_conversation": 60,
+      "num_workers": 1
+    },
+    "phase_b": {
+      "started": "2026-10-23T02:46:28",
+      "finished": "2026-10-23T02:46:47",
+      "records": 348
+    },
+    "direct_call": {
+      "started": "2026-10-23T03:09:11",
+      "finished": "2026-10-23T03:09:29",
+      "records": 621,
+      "inputs_by_kind": {
+        "beta0": 81,
+        "early_return": 12,
+        "year_range": 53,
+        "genre_filter": 28,
+        "excluded_ids": 29,
+        "ref_blend": 12
+      },
+      "ref_lookups": 25,
+      "guest_samples": {
+        "A-imdb": 100,
+        "A-hm": 100
+      },
+      "seed": 20261023
+    }
+  },
+  "protected_files_md5": {
+    "baseline": "logs/fixture_capture/md5_baseline.txt",
+    "unchanged_after_recording": true,
+    "entries": [
+      "bf170a76742b0853a90c94aad4aa7180  data/imdb/user_profiles.csv",
+      "16598ec47dadea8081696c0897cf56a1  data/imdb/interactions.csv",
+      "b48855856ca0743e1023353bfab54a4f  data/imdb/items.csv",
+      "59c5b3b442989ea87e139e7ee2bebe09  data/imdb/users.csv",
+      "4b5c137029f03b53c568c87a99e5c468  data/imdb/.profile_hash.json",
+      "e6ce3f16674e10528476d1ff4ee5ba95  data/hm/user_profiles.csv",
+      "0db6baac764eddc2ed70f05d1542eced  data/hm/interactions.csv",
+      "536b362e1c91bfb096f97b9fff665da5  data/hm/hm.csv",
+      "ae7230d42b1cb76329c13ba68079f093  data/hm/users.csv",
+      "e213e5aba92956351fc6d634dc890a9d  data/hm/.profile_hash.json",
+      "aa55158d901283a54ae986fc8f24b365  data/imdb_fixture/users.csv",
+      "599d1867a78bc74d8e9060e56515c9d5  data/imdb_fixture/interactions.csv",
+      "98c9da83c6630a93af62ba1737e46c9f  data/imdb_fixture/user_profiles.csv",
+      "0afc50653500911c453df0730f51bd9d  data/imdb_fixture/.profile_hash.json"
+    ]
+  },
+  "directories": {
+    "inputs": {
+      "files": 7,
+      "bytes": 8646,
+      "sha256": "3434990088efe32a0d9f52636d2f9ec85625519f95a663ef8038353ee70e37a5",
+      "script": "scripts/make_fixture_pairs.py; imdb_fixture profiles via scripts/record_fixtures.py --build-profiles-only (LLM, not reproducible)",
+      "script_commit": "79bdc62",
+      "frozen_commit": "79bdc62"
+    },
+    "phase_a": {
+      "files": 174,
+      "bytes": 3121376,
+      "sha256": "b8b9357a87d9ce1764974882bf559ca8cac392496221acff16792605dc02a206",
+      "script": "scripts/run_fixture_recording.sh → scripts/record_fixtures.py (utils/fixture_capture.py hooks)",
+      "script_commit": "79bdc62",
+      "frozen_commit": "79c3690"
+    },
+    "phase_b": {
+      "files": 3,
+      "bytes": 5537550,
+      "sha256": "f441344452ac40b53b8d197f991d14e062100d640afe84b8b0bcd8e1dad737f1",
+      "script": "scripts/replay_grid_es.py (run by run_fixture_recording.sh)",
+      "script_commit": "79bdc62",
+      "frozen_commit": "8c67a5b",
+      "staged_at": "logs/fixture_capture/phase_b_20261023024627"
+    },
+    "direct_call": {
+      "files": 247,
+      "bytes": 10341328,
+      "sha256": "44091ef6d2dedad9f5e31cb351c833be58f50555df9ccbf1cc385633b6421201",
+      "script": "scripts/record_direct_calls.py",
+      "script_commit": "ba049b7 (run from the working tree on 82aeed3; the committed script is the one that ran)",
+      "frozen_commit": "8c67a5b",
+      "staged_at": "logs/fixture_capture/direct_20261023030910"
+    },
+    ".": {
+      "files": 1,
+      "bytes": 18412,
+      "sha256": "f7ec0216fb7a2dd17b8a589261dd2d7efabab690396ececadd0566ed4f6bc134",
+      "script": "scripts/inspect_fixtures.py (inspect.md, phase_a/duplicates.json)",
+      "script_commit": "ba049b7",
+      "frozen_commit": "8c67a5b",
+      "file_list": [
+        "inspect.md"
+      ]
+    }
+  },
+  "checksums": "SHA256SUMS (per file); directory sha256 = sha256 of its SHA256SUMS lines"
+}

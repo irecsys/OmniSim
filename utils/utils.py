@@ -1,14 +1,13 @@
 # @Time   : January, 2023
 # @Author : Dr. Yong Zheng
-# @Email  : yzheng66@iit.edu
+# @Email  : yzheng66@illinoistech.edu
 
 """
-mopo.utils.utils
+utils.utils
 ################################################
 """
 
 import datetime
-import importlib
 import os
 import json
 import ast
@@ -16,10 +15,10 @@ import re
 import random
 import numpy as np
 import pandas as pd
-import pickle
 import requests as _requests
 import yaml
 from openai import AzureOpenAI, OpenAI
+from utils import llm_calls
 from utils.configurator import Config
 from dotenv import load_dotenv
 
@@ -73,6 +72,7 @@ class _ThetaCompletions:
             resp = _requests.post(url, headers=headers, json=payload, timeout=120)
             if resp.status_code not in (409, 429, 503):
                 break
+            llm_calls.note_retry(resp.status_code)   # retries inside one logical call (counted apart)
             wait = 2 ** attempt  # 1, 2, 4, 8, 16, 32 seconds
             _time.sleep(wait)
         resp.raise_for_status()
@@ -107,7 +107,13 @@ class SentenceTransformerEmbeddingsClient:
     """Local embeddings client using sentence-transformers. Mimics client_embeddings interface."""
     def __init__(self, model_name: str):
         import os
-        from sentence_transformers import SentenceTransformer
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as e:
+            raise ImportError(
+                "embeddings_provider 'sentence-transformers' needs the optional package sentence-transformers, "
+                "which requirements.txt does not install: pip install \"sentence-transformers>=2.2.0,<7\""
+            ) from e
         os.environ.setdefault('HF_HUB_OFFLINE', '1')
         os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')
         self._model = SentenceTransformer(model_name)
@@ -160,9 +166,9 @@ def _ensure_complete(text: str) -> str:
 def cosine_sim(a, b) -> float:
     """Return raw cosine similarity in [-1, 1].
 
-    Per paper Eq. 3:  S_cos(x, y) = cos(e_x, e_y)
+    S_cos(x, y) = cos(e_x, e_y)
     Use ``normalize_cosine()`` to map the result to [0, 1] before combining
-    with other scores (Eq. 4).
+    with other scores.
     """
     a, b = np.array(a, dtype=float), np.array(b, dtype=float)
     norm_a, norm_b = np.linalg.norm(a), np.linalg.norm(b)
@@ -174,10 +180,10 @@ def cosine_sim(a, b) -> float:
 def normalize_cosine(s: float) -> float:
     """Map a raw cosine similarity in [-1, 1] to [0, 1].
 
-    Per paper Eq. 4:  S̃ = (s + 1) / 2
-    Elasticsearch kNN already returns scores in this range, so this function
+    S̃ = (s + 1) / 2
+    The retrieval backend's kNN scores are already in this range, so this function
     is only needed when calling ``cosine_sim()`` directly (e.g. for user-profile
-    comparisons in Eq. 6).
+    comparisons in the hybrid score).
     """
     return (s + 1.0) / 2.0
 
@@ -185,7 +191,7 @@ def normalize_cosine(s: float) -> float:
 def normalize_bm25(scores: dict) -> dict:
     """Min-max normalise a dict of BM25 scores to [0, 1].
 
-    Per paper Eq. 4:  S̃_BM25 = (s − s_min) / (s_max − s_min)
+    S̃_BM25 = (s − s_min) / (s_max − s_min)
     If all scores are equal the function returns 0 for every item.
     """
     if not scores:
@@ -293,14 +299,30 @@ def _build_embeddings_client(provider: str, config, api_key: str):
         raise ValueError(f"Unknown embeddings provider: {provider}")
 
 
+def resolve_embeddings_provider(config) -> str:
+    """embeddings_provider, defaulting to the chat provider (openai_provider, default "openai").
+    Shared by the query client below and the local index builder (utils/retrieval/local_index.py)."""
+    chat_provider = str(config.get("openai_provider", "openai")).lower()
+    return str(config.get("embeddings_provider") or chat_provider).lower()
+
+
 def get_openai_clients(config: Config):
+    """
+    Build the chat client and the embeddings client from config; returns (client_chat, client_embeddings).
+    Chat (openai_provider): openai (OPENAI_KEY), azure (AZURE_KEY; chat_endpoint, chat_api_version),
+    azure_foundry (AZURE_KEY; chat_endpoint is the base URL) or thetaedgecloud (THETA_KEY; chat_model is
+    turned into the Theta model slug). Embeddings (embeddings_provider, defaults to openai_provider):
+    openai (OPENAI_KEY), azure (AZURE_KEY; embeddings_endpoint, embeddings_api_version),
+    sentence-transformers (local model embeddings_model, no key) or thetaedgecloud (returns no vectors).
+    Keys are read from the environment or .env. An unknown provider raises ValueError.
+    """
     load_dotenv()
     api_key = os.getenv("OPENAI_KEY")
     azure_key = os.getenv("AZURE_KEY")
 
     chat_provider = str(config.get("openai_provider", "openai")).lower()
     # embeddings_provider defaults to chat provider if not set
-    embeddings_provider = str(config.get("embeddings_provider") or chat_provider).lower()
+    embeddings_provider = resolve_embeddings_provider(config)
 
     chat_key = azure_key if chat_provider == "azure" else api_key
     emb_key = azure_key if embeddings_provider == "azure" else api_key
@@ -332,7 +354,7 @@ def rephrase_attribute_to_natural_language(config: Config, client_chat, attribut
                    attribute_meaning=attribute_meaning,
                    value=value)
 
-    completion = client_chat.chat.completions.create(
+    completion = llm_calls.chat(client_chat, 'rephrase_attribute',
         model=config['chat_model'],
         messages=[
             {"role": "system", "content": P(config, 'rephrase_features_system')},
@@ -364,7 +386,7 @@ def extract_attribute_value(config: Config, client_chat, attribute, item_info, d
     if details is not None:
         prompt = P(config, 'extract_attribute_prompt', attribute=attribute, details=details)
 
-        response = client_chat.chat.completions.create(
+        response = llm_calls.chat(client_chat, 'extract_attribute_value',
             model=config['chat_model'],
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
@@ -404,6 +426,14 @@ def extract_attribute_value(config: Config, client_chat, attribute, item_info, d
 
 # extract appropriate attributes for asking
 def extract_attributes_for_asking(config: Config, client_chat, item_type: str, target_category: str, attribute_by_openai=True):
+    """
+    Attributes the bot may ask about, as a list of attribute keys ("details" is never included).
+    Static mode (attribute_by_openai=False): the keys of the configured item_attributes; no LLM call.
+    Adaptive mode: attributes proposed by the LLM (default_attributes if it proposes none) plus the
+    configured item_attributes, without duplicates; a second LLM call keeps those that make sense for
+    target_category (if it keeps none, the combined list is returned). Configured attributes are
+    returned as their column keys, so their values can be looked up in the item record.
+    """
     def _is_details_attr(key_or_label: str) -> bool:
         return str(key_or_label).strip().lower().replace("_", " ") in {"detail", "details"}
 
@@ -427,7 +457,7 @@ def extract_attributes_for_asking(config: Config, client_chat, item_type: str, t
         attr_prompt = P(config, 'extract_candidate_attrs_prompt',
                         role_bot=config['role_bot'], item_type=item_type, target_category=target_category)
 
-        response = client_chat.chat.completions.create(
+        response = llm_calls.chat(client_chat, 'extract_candidate_attributes',
             model=config['chat_model'],
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
@@ -470,11 +500,11 @@ def extract_attributes_for_asking(config: Config, client_chat, item_type: str, t
         key_norms = {_norm_attr(entry["key"]): entry["key"] for entry in entries}
         displays = [entry["display"] for entry in entries]
 
-        # Step 3: filter out attributes that don’t make sense for this category
+        # Step 3: filter out attributes that don't make sense for this category
         filter_prompt = P(config, 'filter_attrs_prompt',
                           role_bot=config['role_bot'], item_type=item_type,
                           target_category=target_category, final_attributes=displays)
-        response = client_chat.chat.completions.create(
+        response = llm_calls.chat(client_chat, 'filter_attributes',
             model=config['chat_model'],
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
@@ -507,7 +537,7 @@ def extract_dynamic_description_from_chat(config: Config, client_chat, chat_hist
     prompt = P(config, 'extract_description_prompt',
                role_bot=config['role_bot'], chat_history=chat_history)
     
-    resp = client_chat.chat.completions.create(
+    resp = llm_calls.chat(client_chat, 'extract_dynamic_description',
         model=config['chat_model'],
         messages=[{"role": "user", "content": prompt}]
     )
@@ -525,7 +555,7 @@ def extract_item_from_title(config: Config, client_chat, title: str, item_catego
     """
     full_title = f"{title} ({item_category})" if item_category else title
     prompt = P(config, 'extract_item_type_prompt', title=full_title)
-    response = client_chat.chat.completions.create(
+    response = llm_calls.chat(client_chat, 'extract_item_from_title',
         model=config['chat_model'],
         messages=[{"role": "user", "content": prompt}],
         temperature=0
@@ -655,229 +685,20 @@ def extract_search_constraints(user_context: str):
     return constraints
 
 
-def search_items_by_embedding(config, es, embedding_vector, top_k,
+def search_items_by_embedding(config, backend, embedding_vector, top_k,
                               user_long_embedding=None, user_short_embedding=None,
                               excluded_ids=None, query_text=None,
                               year_range=None, exclude_genres=None,
                               require_any_genre=None, reference_embeddings=None):
-    """Retrieve and rank candidate items using the hybrid scoring formula from the paper.
-
-    Implements Equations 3–6:
-
-    **Eq. 5 — Base retrieval score** (combines kNN cosine + BM25):
-        S̃_base(q, i) = λ · S̃_BM25(q, M_i,d) + (1 − λ) · S̃_cos(q, i)
-
-    **Eq. 6 — Hybrid score** (adds user preference when available):
-        S̃_hybrid = α · S̃_base + (1 − α) · [β · S̃_cos(i, p_short) + (1 − β) · S̃_cos(i, p_long)]
-
-    Score normalisation (Eq. 4):
-      - Cosine: S̃_cos = (s + 1) / 2  — maps [-1, 1] → [0, 1]
-      - BM25:   S̃_BM25 = (s − s_min) / (s_max − s_min)  — min-max normalisation
-
-    Note: Elasticsearch kNN already returns scores as (1 + cosine) / 2, so the kNN
-    score is S̃_cos directly; no further normalisation is needed for that component.
-
-    Args:
-        config: simulation configuration dict.
-        es: Elasticsearch client instance.
-        embedding_vector: dense query embedding (the encoded user preference).
-        top_k: number of top items to return after scoring.
-        user_long_embedding: encoded long-term user preference (optional).
-        user_short_embedding: encoded short-term user preference (optional).
-        excluded_ids: item IDs already shown — excluded at the ES filter level.
-        query_text: raw user query string for BM25 matching (optional).
-        year_range: (min_year, max_year) hard range filter on release_year (optional).
-        exclude_genres: genre strings to hard-exclude (optional).
-        require_any_genre: at least one of these genres must be present (optional).
-        reference_embeddings: embeddings of reference items mentioned by the user;
-            blended into the query vector before kNN search (optional).
-
-    Returns:
-        List of item dicts sorted by descending hybrid score, limited to top_k.
-    """
-    col_itemid   = config['col_itemid']
-    col_category = config['col_category']
-
-    # ── Reference embedding blending ──────────────────────────────────────────
-    # If the user mentioned specific items ("something like Inception"), blend their
-    # embeddings into the query vector to steer the kNN search towards similar items.
-    if reference_embeddings and embedding_vector is not None:
-        ref_avg   = np.mean(reference_embeddings, axis=0).tolist()
-        alpha_ref = config.get('reference_blend_weight', 0.3)
-        embedding_vector = [
-            (1 - alpha_ref) * q + alpha_ref * r
-            for q, r in zip(embedding_vector, ref_avg)
-        ]
-
-    # ── Build hard filters ────────────────────────────────────────────────────
-    must_not_clauses = []
-    filter_clauses   = []
-
-    if excluded_ids:
-        must_not_clauses.append({"terms": {col_itemid: list(excluded_ids)}})
-
-    if exclude_genres:
-        for genre in exclude_genres:
-            must_not_clauses.append({"match": {col_category: genre}})
-
-    if year_range:
-        filter_clauses.append(
-            {"range": {"release_year": {"gte": year_range[0], "lte": year_range[1]}}}
-        )
-
-    if require_any_genre:
-        filter_clauses.append({
-            "bool": {
-                "should": [{"match_phrase": {col_category: g}} for g in require_any_genre],
-                "minimum_should_match": 1,
-            }
-        })
-
-    def _build_filter():
-        clauses = {}
-        if filter_clauses:
-            clauses['filter'] = filter_clauses
-        if must_not_clauses:
-            clauses['must_not'] = must_not_clauses
-        return {"bool": clauses} if clauses else None
-
-    knn_filter = _build_filter()
-
-    # ── Fallback when no embedding is available ───────────────────────────────
-    if embedding_vector is None:
-        fallback_q = knn_filter if knn_filter else {"match_all": {}}
-        res       = es.search(index=config['es_index'], body={"size": top_k, "query": fallback_q})
-        attr_keys = list(config.get('item_attributes', {}).keys())
-        return [
-            {k: h["_source"].get(k)
-             for k in [col_itemid, config['col_title'], config['col_details'], col_category] + attr_keys
-             if k in h["_source"]}
-            for h in res["hits"]["hits"]
-        ]
-
-    # ── Step 1: kNN search → S̃_cos(q, i) ────────────────────────────────────
-    # Fetch 3× more candidates than needed so threshold filtering still yields
-    # enough results after removing low-similarity items.
-    fetch_k        = top_k * 3
-    num_candidates = max(fetch_k * 10, 200)
-    knn_clause     = {
-        "field": "embedding",
-        "query_vector": embedding_vector,
-        "k": fetch_k,
-        "num_candidates": num_candidates,
-    }
-    if knn_filter:
-        knn_clause["filter"] = knn_filter
-
-    knn_res = es.search(
-        index=config['es_index'],
-        body={"size": fetch_k, "knn": knn_clause, "_source": True},
-    )
-
-    # ES kNN cosine score is already (1 + cosine) / 2 ∈ [0, 1] — this IS S̃_cos.
-    knn_scores  = {}   # item_id → S̃_cos(q, i)
-    knn_sources = {}   # item_id → ES _source document
-    for hit in knn_res["hits"]["hits"]:
-        iid = hit["_source"].get(col_itemid)
-        if iid is not None:
-            knn_scores[iid]  = hit["_score"]   # already normalised cosine
-            knn_sources[iid] = hit["_source"]
-
-    # ── Step 2: BM25 search → S̃_BM25(q, M_i,d) ──────────────────────────────
-    # Paper Eq. 5: BM25 relevance between the query and the single aggregated
-    # "details" field M_i,d (the concatenation of all item attributes, built at
-    # index time as `bm25_details`).  We run a `match` query against that one
-    # field — not a multi-field best_fields query — then min-max normalise the
-    # raw scores per Eq. 4.
-    bm25_scores_norm = {}
-    if query_text and knn_scores:
-        bm25_field = config.get('bm25_details_field', 'bm25_details')
-        # Use a terms filter to restrict BM25 to the exact candidate set from kNN.
-        bm25_query = {
-            "bool": {
-                "must": {
-                    "match": {
-                        bm25_field: {"query": query_text},
-                    }
-                },
-                "filter": [{"terms": {col_itemid: list(knn_scores.keys())}}],
-            }
-        }
-        bm25_res = es.search(
-            index=config['es_index'],
-            body={"query": bm25_query, "size": len(knn_scores), "_source": [col_itemid]},
-        )
-        raw_bm25_scores = {
-            hit["_source"][col_itemid]: hit["_score"]
-            for hit in bm25_res["hits"]["hits"]
-            if col_itemid in hit["_source"]
-        }
-        # Eq. 4 — min-max normalisation of BM25 scores to [0, 1]
-        bm25_scores_norm = normalize_bm25(raw_bm25_scores)
-
-    # ── Step 3 & 4: compute S̃_base (Eq. 5) and S̃_hybrid (Eq. 6) ─────────────
-    # λ  — balance between BM25 precision and cosine semantic similarity
-    # α  — weight of base retrieval score vs user profile preference
-    # β  — within user preference: short-term vs long-term ratio
-    lam   = config.get('lambda_bm25', 0.3)
-    alpha = config.get('weight_es_score', 0.7)
-    beta  = config.get('weight_user_taste_short', 0.3) if user_short_embedding is not None else 0.0
-
-    attr_keys = list(config.get('item_attributes', {}).keys())
-    candidates = []
-
-    for iid, cos_score in knn_scores.items():
-        source = knn_sources[iid]
-
-        # Eq. 5: S̃_base = λ · S̃_BM25 + (1 − λ) · S̃_cos
-        bm25_score = bm25_scores_norm.get(iid, 0.0)
-        base_score = lam * bm25_score + (1 - lam) * cos_score
-
-        # Eq. 6: add user preference signal when profile is available
-        if user_long_embedding is not None:
-            item_embedding = source.get('embedding')
-            if item_embedding:
-                # Normalize raw cosine to [0,1] per Eq. 4: S̃_cos = (s + 1) / 2
-                long_sim = normalize_cosine(cosine_sim(item_embedding, user_long_embedding))
-                if user_short_embedding is not None:
-                    short_sim = normalize_cosine(cosine_sim(item_embedding, user_short_embedding))
-                    profile_sim = beta * short_sim + (1 - beta) * long_sim
-                else:
-                    profile_sim = long_sim
-                score = alpha * base_score + (1 - alpha) * profile_sim
-            else:
-                score = base_score  # no stored embedding — fall back to base score
-        else:
-            score = base_score  # no user profile → pure retrieval score
-
-        entry = {
-            config['col_itemid']:   iid,
-            config['col_title']:    source.get(config['col_title']),
-            config['col_category']: source.get(config['col_category']),
-            "score": score,
-            "_base_score": base_score,
-        }
-        for key in attr_keys:
-            val = source.get(key)
-            if val is not None and str(val).strip() not in ('', 'nan', 'NaN', 'None'):
-                entry[key] = val
-        candidates.append(entry)
-
-    # Paper Eq. 4 / Section 4.2 threshold mechanism:
-    # Compare max(S̃_base) against τ. Only enter recommendation phase when the
-    # best candidate's base retrieval score meets the threshold; otherwise return
-    # an empty list so the caller continues preference elicitation.
-    tau = config['threshold_similarity']
-    if not candidates or max(c["_base_score"] for c in candidates) < tau:
-        return []
-
-    # Strip the internal bookkeeping field before returning
-    for c in candidates:
-        c.pop("_base_score", None)
-
-    # Final ranking by hybrid score (descending)
-    candidates.sort(key=lambda x: x['score'], reverse=True)
-    return candidates[:top_k]
+    """Retrieve and rank candidate items with the local index: hybrid BM25 + cosine base score,
+    optionally blended with the user's short/long-term preference vectors
+    (utils.retrieval.local_search.search_items_local; `backend` is a LocalBackend)."""
+    kwargs = dict(user_long_embedding=user_long_embedding, user_short_embedding=user_short_embedding,
+                  excluded_ids=excluded_ids, query_text=query_text,
+                  year_range=year_range, exclude_genres=exclude_genres,
+                  require_any_genre=require_any_genre, reference_embeddings=reference_embeddings)
+    from utils.retrieval import local_search   # lazy: local_search imports this module
+    return local_search.search_items_local(config, backend, embedding_vector, top_k, **kwargs)
 
 def expand_query_for_search(config, client_chat, user_context: str) -> str:
     """
@@ -896,7 +717,7 @@ def expand_query_for_search(config, client_chat, user_context: str) -> str:
         f"Output ONLY a comma-separated list of keywords, nothing else."
     )
     try:
-        resp = client_chat.chat.completions.create(
+        resp = llm_calls.chat(client_chat, 'expand_query_for_search',
             model=config['chat_model'],
             messages=[{"role": "user", "content": prompt}],
             max_tokens=80,
@@ -905,8 +726,14 @@ def expand_query_for_search(config, client_chat, user_context: str) -> str:
         expanded = resp.choices[0].message.content.strip()
         # Return original + expanded so we don't lose user's exact terms
         return f"{user_context} {expanded}"
-    except Exception:
-        return user_context
+    except Exception as e:
+        return llm_calls.fallback('expand_query_for_search', e, user_context, config)
+
+
+# Fallback text where an LLM-generated line is a whole bot turn: domain-neutral and
+# not misleading. The template pools of the normal path (bot_greeting, bot_closing_success) use film words.
+NEUTRAL_GREETING = "Hi! What are you looking for today?"
+NEUTRAL_CLOSING = "Great, glad we found the right one."
 
 
 def generate_chit_chat(config: Config, client_chat, speaker: str, user_profile: dict = None, context: str = "pre_recommendation", context_data: dict = None, chat_history: list = None) -> str:
@@ -962,15 +789,17 @@ def generate_chit_chat(config: Config, client_chat, speaker: str, user_profile: 
         messages = [system_msg, instruction_msg]
 
     try:
-        response = client_chat.chat.completions.create(
+        response = llm_calls.chat(client_chat, 'generate_chit_chat',
             model=config['chat_model'],
             messages=messages,
-            temperature=1.2,
+            temperature=config.get('temp_chitchat', 1.2),
             max_tokens=60
         )
         return _ensure_complete(response.choices[0].message.content.strip())
-    except Exception:
-        return "Let's see what I can find for you!"
+    except Exception as e:
+        # a prefix elsewhere: no text (the caller writes its own turn); greeting / closing: a whole bot turn
+        text = {'greeting': NEUTRAL_GREETING, 'closing': NEUTRAL_CLOSING}.get(context, "")
+        return llm_calls.fallback('generate_chit_chat', e, text, config)
 
 
 def generate_rejection_explanation(config: Config, client_chat, target_item_row, recommended_items: list, previous_rejections: list = None, chat_history: list = None) -> str:
@@ -1028,15 +857,15 @@ def generate_rejection_explanation(config: Config, client_chat, target_item_row,
         messages = [system_msg, instruction_msg]
 
     try:
-        response = client_chat.chat.completions.create(
+        response = llm_calls.chat(client_chat, 'generate_rejection_explanation',
             model=config['chat_model'],
             messages=messages,
             temperature=config.get('temp_rejection', 0.9),
             max_tokens=80
         )
         return _ensure_complete(response.choices[0].message.content.strip())
-    except Exception:
-        return "None of these match what I'm looking for."
+    except Exception as e:
+        return llm_calls.fallback('generate_rejection_explanation', e, "None of these match what I'm looking for.", config)
 
 
 def generate_recommendation_explanation(config: Config, client_chat, recommended_items: list, chat_history: list = None) -> str:
@@ -1072,15 +901,15 @@ def generate_recommendation_explanation(config: Config, client_chat, recommended
         messages = [system_msg, instruction_msg]
 
     try:
-        response = client_chat.chat.completions.create(
+        response = llm_calls.chat(client_chat, 'generate_recommendation_explanation',
             model=config['chat_model'],
             messages=messages,
             temperature=config.get('temp_rec_explain', 0.9),
             max_tokens=60
         )
         return _ensure_complete(response.choices[0].message.content.strip())
-    except Exception:
-        return ""
+    except Exception as e:
+        return llm_calls.fallback('generate_recommendation_explanation', e, "", config)
 
 
 _USER_ACCEPTANCE_PHRASES = [
@@ -1146,19 +975,22 @@ def generate_bot_closing_failed(config: Config, client_chat, chat_history: list 
     if chat_history:
         messages = list(chat_history[-4:]) + messages
     try:
-        response = client_chat.chat.completions.create(
+        response = llm_calls.chat(client_chat, 'generate_bot_closing_failed',
             model=config['chat_model'],
             messages=messages,
             temperature=config.get('temp_chitchat', 1.0),
             max_tokens=60,
         )
         return _ensure_complete(response.choices[0].message.content.strip().strip('"').strip("'"))
-    except Exception:
-        return "Didn't get there today — but I'm sure you'll find it."
+    except Exception as e:
+        return llm_calls.fallback('generate_bot_closing_failed', e, "Didn't get there today — but I'm sure you'll find it.", config)
 
 
-def rephrase_phrase(config: Config, client_chat, phrase: str) -> str:
-    """Use LLM to rephrase a template phrase so it sounds unique every time."""
+def rephrase_phrase(config: Config, client_chat, phrase: str, fallback_text: str = None) -> str:
+    """Use LLM to rephrase a template phrase so it sounds unique every time.
+
+    If the call fails, `fallback_text` is used when given (greetings: the templates use film words),
+    otherwise the template phrase itself."""
     prompt = (
         f"Rephrase the following sentence in a natural, conversational way. "
         f"Rules: exactly 1 short sentence, max 12 words, same meaning, different wording. "
@@ -1166,7 +998,7 @@ def rephrase_phrase(config: Config, client_chat, phrase: str) -> str:
         f"Return only the rephrased sentence, nothing else.\n\nOriginal: {phrase}"
     )
     try:
-        response = client_chat.chat.completions.create(
+        response = llm_calls.chat(client_chat, 'rephrase_phrase',
             model=config['chat_model'],
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
@@ -1174,8 +1006,8 @@ def rephrase_phrase(config: Config, client_chat, phrase: str) -> str:
         )
         result = response.choices[0].message.content.strip().strip('"').strip("'")
         return result if result else phrase
-    except Exception:
-        return phrase
+    except Exception as e:
+        return llm_calls.fallback('rephrase_phrase', e, phrase if fallback_text is None else fallback_text, config)
 
 
 def generate_user_responses_free_mode(config: Config, client_chat, item_row, user_profile: dict = None, chat_history: list = None):
@@ -1233,7 +1065,7 @@ def generate_user_responses_free_mode(config: Config, client_chat, item_row, use
     if random.random() < config.get('short_reply_ratio', 0.45):
         short_prompts = load_prompts(config).get('free_user_short_prompts', [])
         try:
-            response = client_chat.chat.completions.create(
+            response = llm_calls.chat(client_chat, 'free_user_short_reply',
                 model=config['chat_model'],
                 messages=_build_messages(random.choice(short_prompts)),
                 temperature=config.get('temp_free_user', 1.0),
@@ -1242,8 +1074,8 @@ def generate_user_responses_free_mode(config: Config, client_chat, item_row, use
             short_reply = response.choices[0].message.content.strip().strip('"').strip("'")
             if short_reply and len(short_reply.split()) <= 8:
                 return short_reply
-        except Exception:
-            pass
+        except Exception as e:
+            llm_calls.fallback('free_user_short_reply', e, None, config)   # go on with the detailed reply
 
     # Primary: use item details field to generate a descriptive user response
     details_col = config.get('col_details', 'details')
@@ -1251,17 +1083,17 @@ def generate_user_responses_free_mode(config: Config, client_chat, item_row, use
         target_details = str(item_row[details_col])
         prompt = P(config, 'free_user_details_prompt', target_details=target_details[:300])
         try:
-            response = client_chat.chat.completions.create(
+            response = llm_calls.chat(client_chat, 'free_user_details_reply',
                 model=config['chat_model'],
                 messages=_build_messages(prompt),
                 temperature=config.get('temp_free_user', 1.0),
                 max_tokens=40,
             )
             user_msg = _truncate_msg(response.choices[0].message.content.strip())
-        except Exception:
-            sentences = re.split(r"[.!?]", target_details)
-            sentences = [s.strip() for s in sentences if s.strip()]
-            user_msg = " ".join(sentences[:2]) if sentences else ""
+        except Exception as e:
+            # v1 used the first two sentences of the target's details here: the user turn gave the answer away.
+            # Empty → the neutral free_user_fallback_prompts below.
+            user_msg = llm_calls.fallback('free_user_details_reply', e, "", config)
 
     # Fallback: generic open-ended description request
     if not user_msg:

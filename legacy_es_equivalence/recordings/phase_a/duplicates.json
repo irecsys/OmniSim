@@ -1,0 +1,12 @@
+{
+  "key_fields": [
+    "dataset",
+    "mode",
+    "user_id",
+    "target_item_id",
+    "config_files"
+  ],
+  "rule": "S5 uses every conversation; S6 (dialogue-level) compares only s6_use (the copy that started first)",
+  "n_conversations": 53,
+  "groups": []
+}

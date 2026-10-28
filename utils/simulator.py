@@ -11,26 +11,28 @@ Three modes are provided, each corresponding to a different interaction strategy
                           and asks about both predefined and discovered attributes.
 
 All three modes share the same hybrid retrieval and user-profile scoring logic
-(see ``utils.utils.search_items_by_embedding`` and paper Equations 3–6).
+(see ``utils.utils.search_items_by_embedding``).
 """
 
+import logging
 import random
 import datetime
 import re
 import os
-import uuid
 import yaml
 import pandas as pd
 
 from utils.configurator import Config
+from utils.dialogue_files import TS_FORMAT, tmp_dialogue_name
 from utils.dataset import Dataset
+from utils import llm_calls
 from utils.utils import (
     generate_chit_chat, generate_rejection_explanation, generate_recommendation_explanation,
     generate_user_responses_free_mode, generate_user_acceptance, generate_bot_closing_failed,
     extract_item_from_title, extract_attribute_value, extract_attributes_for_asking,
     extract_dynamic_description_from_chat, rephrase_attribute_to_natural_language,
     search_items_by_embedding, expand_query_for_search, extract_search_constraints,
-    rephrase_phrase, _truncate_msg,
+    rephrase_phrase, _truncate_msg, NEUTRAL_GREETING,
 )
 
 _PHRASE_CACHE: dict = {}
@@ -90,32 +92,17 @@ def _clean_for_output(config, role, message):
 # Constraint & reference movie helpers
 # ---------------------------------------------------------------------------
 
-def _lookup_reference_embeddings(es, config, reference_titles: list) -> list:
+def _lookup_reference_embeddings(backend, config, reference_titles: list) -> list:
     """
     Given a list of movie title strings extracted from user context (e.g. ["Death Wish", "Amélie"]),
-    look each up in ES and return their pre-computed embedding vectors.
+    look each up in the local index (utils.retrieval.ref_lookup; `backend` is a LocalBackend) and return
+    their embedding vectors.
     """
-    embeddings = []
-    for title in reference_titles:
-        try:
-            res = es.search(
-                index=config['es_index'],
-                body={
-                    "query": {"match": {"title": {"query": title, "fuzziness": "AUTO"}}},
-                    "_source": ["embedding", "title"],
-                    "size": 1,
-                }
-            )
-            if res['hits']['hits']:
-                emb = res['hits']['hits'][0]['_source'].get('embedding')
-                if emb:
-                    embeddings.append(emb)
-        except Exception:
-            pass
-    return embeddings
+    from utils.retrieval import ref_lookup
+    return ref_lookup.lookup_reference_embeddings(backend, config, reference_titles)
 
 
-def _build_rec_constraints(user_context: str, es, config) -> tuple:
+def _build_rec_constraints(user_context: str, backend, config) -> tuple:
     """
     Extract search_constraints dict and reference_embeddings list from user_context.
     Returns (constraints_dict, reference_embeddings_list).
@@ -123,7 +110,7 @@ def _build_rec_constraints(user_context: str, es, config) -> tuple:
     constraints = extract_search_constraints(user_context)
     ref_embeddings = []
     if constraints.get('reference_titles'):
-        ref_embeddings = _lookup_reference_embeddings(es, config, constraints['reference_titles'])
+        ref_embeddings = _lookup_reference_embeddings(backend, config, constraints['reference_titles'])
     return constraints, ref_embeddings
 
 
@@ -138,10 +125,9 @@ def _setup_output(config, target_item_id, user_id=None):
     base = os.path.join(config['outputs_folder'], config['dataset'], config['mode_refinement'], strategy)
     chat_folder = (os.path.join(base, run_ts) if run_ts else base) + os.sep
     os.makedirs(chat_folder, exist_ok=True)
-    ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    uid_part = f"-{user_id}" if user_id is not None else ""
-    unique = uuid.uuid4().hex[:8]
-    tmp_file = os.path.join(chat_folder, f"{strategy}-{target_item_id}{uid_part}-tmp-{ts}-{unique}.txt")
+    ts = datetime.datetime.now().strftime(TS_FORMAT)
+    tmp_file = os.path.join(chat_folder, tmp_dialogue_name(strategy, target_item_id, user_id, ts))
+    llm_calls.attach_tmp(tmp_file)
     return chat_folder, tmp_file, ts
 
 
@@ -163,6 +149,17 @@ def _get_item_info(config, dataset, target_item_id):
     return item_info, row, title, category, details
 
 
+def _note_target_not_found(config, user_id, target_item_id):
+    """Visibility of a missing target: the target item is not in dataset.df_items, so the target title and
+    details are empty and the dialogue cannot succeed. One WARNING per conversation and a run-summary count;
+    the dialogue itself is unchanged (no LLM call, no random draw)."""
+    llm_calls.note_target_not_found()
+    logging.getLogger().warning(
+        f"Target item {target_item_id} not found in the items of dataset {config.get('dataset')} "
+        f"(strategy {config.get('generation_strategy', 'unknown')}, user {user_id}): the target title is empty "
+        f"and the dialogue cannot succeed.")
+
+
 def _get_user_embeddings(config, client_embeddings, profile):
     """Encode user long/short preference texts into embeddings."""
     long_emb = short_emb = None
@@ -170,7 +167,7 @@ def _get_user_embeddings(config, client_embeddings, profile):
         val = profile.get(field, '')
         text = str(val).strip() if val and str(val).strip().lower() not in ('nan', 'none', '') else ''
         if text:
-            emb = client_embeddings.embeddings.create(
+            emb = llm_calls.embed(client_embeddings, 'profile_embedding',
                 model=config['embeddings_model'], input=text
             ).data[0].embedding
             if field == 'user_likes_long':
@@ -313,7 +310,7 @@ _REJECTION_MESSAGES = [
 
 
 def _do_recommendation(
-    config, client_chat, es, embedding_vector,
+    config, client_chat, backend, embedding_vector,
     target_title, target_item_id, item_row, profile,
     chat_history, rejected_item_ids, previous_rejections, disliked_context,
     rec_attempts, user_long_emb, user_short_emb, excluded_ids,
@@ -331,7 +328,7 @@ def _do_recommendation(
     """
     constraints = search_constraints or {}
     es_results = search_items_by_embedding(
-        config, es, embedding_vector,
+        config, backend, embedding_vector,
         top_k=config['max_similar_items'],
         user_long_embedding=user_long_emb,
         user_short_embedding=user_short_emb,
@@ -343,7 +340,7 @@ def _do_recommendation(
         reference_embeddings=reference_embeddings,
     )
     es_results = [r for r in es_results if str(r[config['col_itemid']]) not in rejected_item_ids]
-    # Deduplicate by item ID within this round (ES may return the same item multiple times)
+    # Deduplicate by item ID within this round (v1's Elasticsearch could return the same item more than once).
     seen_ids, deduped = set(), []
     for r in es_results:
         iid = str(r[config['col_itemid']])
@@ -355,8 +352,9 @@ def _do_recommendation(
     if not topN:
         return False, 0, disliked_context, False, False
 
-    # No relevance gate — threshold_similarity already filters low-score results.
-    # If topN is empty (all below threshold), we already returned above.
+    # No further score check here: the τ gate (threshold_similarity) is applied inside the retrieval
+    # (search_items_by_embedding returns [] when the best base score is below τ) and does not filter
+    # individual items. An empty topN (nothing returned, or all rejected / duplicates) returned above.
 
     # Optional explanation: why we're recommending these items
     explanation = ""
@@ -471,9 +469,10 @@ def _start_conversation(config, client_chat, tmp_file, name_bot, name_user,
     _greetings = _load_phrases('bot_greeting') or _FALLBACK_GREETINGS
     if random.random() < config.get('chit_chat_ratio', 0.0):
         chit = _unique_chit_chat(config, client_chat, "bot", profile, "greeting", {}, chat_history, used_chit_chat)
-        bot_msg = chit if chit else rephrase_phrase(config, client_chat, random.choice(_greetings))
+        bot_msg = chit if chit else rephrase_phrase(config, client_chat, random.choice(_greetings),
+                                                    fallback_text=NEUTRAL_GREETING)
     else:
-        bot_msg = rephrase_phrase(config, client_chat, random.choice(_greetings))
+        bot_msg = rephrase_phrase(config, client_chat, random.choice(_greetings), fallback_text=NEUTRAL_GREETING)
     chat_history.append({"role": "assistant", "content": bot_msg})
     write_chat_to_file(tmp_file, name_bot, bot_msg, config, "bot")
 
@@ -494,6 +493,25 @@ def _unique_chit_chat(config, client_chat, speaker, user_profile, context, conte
     return chit
 
 
+def _round_limit_reached(config, rounds, mode, user_id, target_item_id) -> bool:
+    """Stop-loss: True once the main loop has run max_total_rounds rounds (default 30).
+
+    A round is one main-loop iteration (one retrieval). After the question budget is used up, a round
+    that shows no item changes nothing, so a dialogue that never shows items again would loop forever.
+    The caller then ends it through the normal failure path (succeed=0).
+    Only a counter comparison: no LLM call, no random draw.
+    """
+    max_total_rounds = int(config.get('max_total_rounds') or 30)
+    if rounds <= max_total_rounds:
+        return False
+    llm_calls.note_round_limit()
+    logging.getLogger().warning(
+        f"Dialogue stopped after {max_total_rounds} rounds without an accepted recommendation "
+        f"(max_total_rounds; mode {mode}, strategy {config.get('generation_strategy', 'unknown')}, "
+        f"user {user_id}, target {target_item_id}); saved as failed (succeed=0).")
+    return True
+
+
 def _save_conversation(chat_folder, user_id, target_item_id, number_turns, rec_attempts, succeed, timestamp, tmp_file):
     """Rename the temporary conversation file to the final standardised filename.
 
@@ -502,10 +520,62 @@ def _save_conversation(chat_folder, user_id, target_item_id, number_turns, rec_a
         {user_id}-{item_id}-{num_turns}-{rec_attempts}-{succeed}-{timestamp}.txt
 
     ``succeed`` is 1 if the target item was accepted by the simulated user, 0 otherwise.
+
+    If LLM calls of this conversation were replaced by fallback text, a last line
+    ``System: <FALLBACK> fallbacks=N sites=... errors=...`` is appended first (utils.llm_calls.fallback_line);
+    without fallbacks the file is unchanged.
+
+    Never overwrites: conversations of the same user and item that start in the same
+    second and end the same way compute the same name. If the name is taken, ``timestamp``
+    (%Y%m%d%H%M%S) moves on by one second (calendar arithmetic, 59 s carries into the next minute) and the
+    next name is tried, at most 1000 times. Only the timestamp field changes; the format stays the same.
+
+    How the name is taken, atomically across threads and processes:
+
+    * ``os.link(tmp_file, final_file)`` first: fails with FileExistsError if the name exists; otherwise the
+      final file appears at once with its full content, and the tmp file is removed afterwards. If the
+      process dies between the two steps, the complete final file and the tmp file are both left in the
+      run folder; the tmp file ({strategy}-{item}{-user}-tmp-{ts}-{id}.txt) is a duplicate. It is never
+      cleaned up (the error-path cleanup glob does not match tmp names); later runs write
+      to a new run folder and are not affected; every tool that reads conversation files (metrics,
+      judge, NLP metrics) skips tmp files with utils.dialogue_files.is_tmp_dialogue.
+    * Where hard links are not supported (FAT / exFAT, some network shares: any OSError other than
+      FileExistsError), the name is reserved with an exclusive create (O_CREAT | O_EXCL, atomic on Linux,
+      macOS and Windows), the placeholder descriptor is closed at once, and ``os.replace`` moves the tmp
+      file over it (Windows cannot replace a file that is open). If the process dies between the two
+      steps, an empty file with a complete name is left: the tools above would count it from its name.
+      If ``os.replace`` fails, the placeholder is removed and the tmp file kept.
     """
+    line = llm_calls.fallback_line()          # Only when LLM fallbacks were used
+    if line:
+        write_chat_to_file(tmp_file, "System", line)
     uid = str(user_id) if user_id is not None else "user"
-    final_file = os.path.join(chat_folder, f"{uid}-{target_item_id}-{number_turns}-{rec_attempts}-{succeed}-{timestamp}.txt")
-    os.rename(tmp_file, final_file)
+    ts = datetime.datetime.strptime(str(timestamp), TS_FORMAT)
+    for _ in range(1000):
+        final_file = os.path.join(chat_folder, f"{uid}-{target_item_id}-{number_turns}-{rec_attempts}-{succeed}-"
+                                               f"{ts.strftime(TS_FORMAT)}.txt")
+        try:
+            os.link(tmp_file, final_file)
+        except FileExistsError:
+            ts += datetime.timedelta(seconds=1)
+            continue
+        except OSError:                          # no hard links on this file system
+            try:
+                os.close(os.open(final_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY))   # closed before replace
+            except FileExistsError:
+                ts += datetime.timedelta(seconds=1)
+                continue
+            try:
+                os.replace(tmp_file, final_file)     # replaces our own empty placeholder
+            except BaseException:
+                os.remove(final_file)                # keep the tmp file, free the name
+                raise
+            llm_calls.saved(final_file, succeed)
+            return final_file
+        os.remove(tmp_file)
+        llm_calls.saved(final_file, succeed)
+        return final_file
+    raise FileExistsError(f"no free file name for {tmp_file} after 1000 attempts")
 
 
 _BOT_CLOSING_FAILED = [
@@ -540,13 +610,16 @@ _BOT_CLOSING_SUCCESS = [
 ]
 
 
-def _end_failed(tmp_file, name_bot, name_user, target_title, target_item_id, config=None, client_chat=None, chat_history=None):
+def _end_failed(tmp_file, name_bot, name_user, target_title, target_item_id, config=None, client_chat=None, chat_history=None,
+                round_limit=False):
     """Write the bot's closing apology and a FAILED system tag to the conversation file.
 
     If *config* and *client_chat* are provided the closing message is generated
     by the LLM for naturalness; otherwise a phrase is sampled from
     ``phrase_templates.yaml`` (``bot_closing_failed`` key) or the hardcoded
     fallback pool ``_BOT_CLOSING_FAILED``.
+    *round_limit*: the dialogue was stopped by ``max_total_rounds``, not by running out of
+    ``max_rec_attempts``; only the reason at the end of the System line differs (v1 has only the latter).
     """
     if config and client_chat:
         closing = generate_bot_closing_failed(config, client_chat, chat_history)
@@ -556,7 +629,9 @@ def _end_failed(tmp_file, name_bot, name_user, target_title, target_item_id, con
     write_chat_to_file(tmp_file, name_bot, closing)
     write_chat_to_file(
         tmp_file, "System",
-        f"<FAILED> Session ended. The target item '{target_title}' ({target_item_id}) was not found within the maximum recommendation attempts."
+        f"<FAILED> Session ended. The target item '{target_title}' ({target_item_id}) was not found "
+        + ("before the dialogue round limit (max_total_rounds) was reached." if round_limit
+           else "within the maximum recommendation attempts.")
     )
 
 
@@ -564,15 +639,16 @@ def _end_failed(tmp_file, name_bot, name_user, target_title, target_item_id, con
 # simulate_free
 # ---------------------------------------------------------------------------
 
+@llm_calls.conversation
 def simulate_free(config: Config, dataset: Dataset, user_id, target_item_id,
-                  client_chat, client_embeddings, es, user_profiles=None):
+                  client_chat, client_embeddings, backend, user_profiles=None):
     """Run one **Free-mode** conversational recommendation session.
 
     In Free mode the bot issues open-ended follow-up prompts (e.g. "Tell me
     more about what you're looking for") and the simulated user responds with
     free-form natural-language descriptions derived from the target item's
     metadata.  After each user turn the full conversation context is embedded
-    and used for hybrid BM25 + kNN retrieval (Equations 3–6).
+    and used for hybrid BM25 + kNN retrieval.
 
     The session ends when:
 
@@ -591,13 +667,15 @@ def simulate_free(config: Config, dataset: Dataset, user_id, target_item_id,
         target_item_id: Ground-truth item the user secretly wants.
         client_chat: Initialised LLM chat client.
         client_embeddings: Initialised embeddings client.
-        es: Connected Elasticsearch client.
+        backend: Local retrieval backend (``LocalBackend``).
         user_profiles: Pre-built user profile dict keyed by user_id (optional).
     """
     name_bot, name_user = config['name_bot'], config['name_user']
     profile = (user_profiles or {}).get(str(user_id), {}) if user_id is not None else {}
 
     item_info, item_row, target_title, target_category, _ = _get_item_info(config, dataset, target_item_id)
+    if item_info.empty:
+        _note_target_not_found(config, user_id, target_item_id)
     user_long_emb, user_short_emb = _get_user_embeddings(config, client_embeddings, profile)
     excluded_ids = _get_excluded_ids(config, dataset, user_id, target_item_id)
     chat_folder, tmp_file, timestamp = _setup_output(config, target_item_id, user_id=user_id)
@@ -650,8 +728,14 @@ def simulate_free(config: Config, dataset: Dataset, user_id, target_item_id,
 
     question_count = 0
     skip_question = False
+    rounds = 0
+    stopped_by_round_limit = False
 
     while rec_attempts < config['max_rec_attempts'] and not conversation_ended:
+        rounds += 1
+        if _round_limit_reached(config, rounds, 'free', user_id, target_item_id):
+            stopped_by_round_limit = True
+            break
         # Bot asks clarifying question — enforce max_questions limit
         max_questions = int(config.get('max_questions') or 99)
         if not skip_question and question_count >= max_questions:
@@ -663,12 +747,12 @@ def simulate_free(config: Config, dataset: Dataset, user_id, target_item_id,
             if disliked_context:
                 user_context += disliked_context
             search_query = expand_query_for_search(config, client_chat, user_context) if config.get('expand_query') else user_context
-            emb = client_embeddings.embeddings.create(
+            emb = llm_calls.embed(client_embeddings, 'query_embedding',
                 model=config['embeddings_model'], input=search_query
             ).data[0].embedding
-            s_constraints, s_ref_embs = _build_rec_constraints(user_context, es, config)
+            s_constraints, s_ref_embs = _build_rec_constraints(user_context, backend, config)
             conversation_ended, succeed, disliked_context, had_results, items_shown = _do_recommendation(
-                config, client_chat, es, emb, target_title, target_item_id, item_row,
+                config, client_chat, backend, emb, target_title, target_item_id, item_row,
                 profile, chat_history, rejected_item_ids, previous_rejections, disliked_context,
                 rec_attempts, user_long_emb, user_short_emb, excluded_ids, tmp_file, name_bot, name_user, used_chit_chat,
                 query_text=search_query, search_constraints=s_constraints, reference_embeddings=s_ref_embs,
@@ -709,12 +793,12 @@ def simulate_free(config: Config, dataset: Dataset, user_id, target_item_id,
         if disliked_context:
             user_context += disliked_context
         search_query = expand_query_for_search(config, client_chat, user_context) if config.get('expand_query') else user_context
-        emb = client_embeddings.embeddings.create(
+        emb = llm_calls.embed(client_embeddings, 'query_embedding',
             model=config['embeddings_model'], input=search_query
         ).data[0].embedding
-        s_constraints, s_ref_embs = _build_rec_constraints(user_context, es, config)
+        s_constraints, s_ref_embs = _build_rec_constraints(user_context, backend, config)
         conversation_ended, succeed, disliked_context, had_results, items_shown = _do_recommendation(
-            config, client_chat, es, emb, target_title, target_item_id, item_row,
+            config, client_chat, backend, emb, target_title, target_item_id, item_row,
             profile, chat_history, rejected_item_ids, previous_rejections, disliked_context,
             rec_attempts, user_long_emb, user_short_emb, excluded_ids, tmp_file, name_bot, name_user, used_chit_chat,
             query_text=search_query, search_constraints=s_constraints, reference_embeddings=s_ref_embs,
@@ -726,7 +810,8 @@ def simulate_free(config: Config, dataset: Dataset, user_id, target_item_id,
             number_turns += 1
 
     if not conversation_ended:
-        _end_failed(tmp_file, name_bot, name_user, target_title, target_item_id, config=config, client_chat=client_chat, chat_history=chat_history)
+        _end_failed(tmp_file, name_bot, name_user, target_title, target_item_id, config=config, client_chat=client_chat, chat_history=chat_history,
+                    round_limit=stopped_by_round_limit)
         number_turns += 1
 
     _save_conversation(chat_folder, user_id, target_item_id, number_turns, shown_recs, succeed, timestamp, tmp_file)
@@ -737,7 +822,7 @@ def simulate_free(config: Config, dataset: Dataset, user_id, target_item_id,
 # ---------------------------------------------------------------------------
 
 def simulate_static(config, dataset, user_id, target_item_id,
-                    client_chat, client_embeddings, es, user_profiles=None):
+                    client_chat, client_embeddings, backend, user_profiles=None):
     """Run one **Static-mode** conversational recommendation session.
 
     Static mode is schema-driven: the bot asks questions **only** about the
@@ -759,16 +844,17 @@ def simulate_static(config, dataset, user_id, target_item_id,
         target_item_id: Ground-truth target item.
         client_chat: LLM chat client.
         client_embeddings: Embeddings client.
-        es: Elasticsearch client.
+        backend: Local retrieval backend (``LocalBackend``).
         user_profiles: Pre-built user profiles (optional).
     """
     simulate_adaptive(config, dataset, user_id, target_item_id,
-                      client_chat, client_embeddings, es,
+                      client_chat, client_embeddings, backend,
                       attribute_by_openai=False, user_profiles=user_profiles)
 
 
+@llm_calls.conversation
 def simulate_adaptive(config: Config, dataset: Dataset, user_id, target_item_id,
-                      client_chat, client_embeddings, es,
+                      client_chat, client_embeddings, backend,
                       attribute_by_openai=True, user_profiles=None):
     """Run one **Adaptive-mode** conversational recommendation session.
 
@@ -800,7 +886,7 @@ def simulate_adaptive(config: Config, dataset: Dataset, user_id, target_item_id,
         target_item_id: Ground-truth target item.
         client_chat: LLM chat client.
         client_embeddings: Embeddings client.
-        es: Elasticsearch client.
+        backend: Local retrieval backend (``LocalBackend``).
         attribute_by_openai: If ``True``, use LLM to discover extra attributes
             beyond the YAML schema (Adaptive mode). If ``False``, restrict to
             the YAML-defined schema only (Static mode).
@@ -811,6 +897,8 @@ def simulate_adaptive(config: Config, dataset: Dataset, user_id, target_item_id,
     profile = (user_profiles or {}).get(str(user_id), {}) if user_id is not None else {}
 
     item_info, item_row, target_title, target_category, target_details = _get_item_info(config, dataset, target_item_id)
+    if item_info.empty:
+        _note_target_not_found(config, user_id, target_item_id)
     user_long_emb, user_short_emb = _get_user_embeddings(config, client_embeddings, profile)
     excluded_ids = _get_excluded_ids(config, dataset, user_id, target_item_id)
     chat_folder, tmp_file, timestamp = _setup_output(config, target_item_id, user_id=user_id)
@@ -838,7 +926,14 @@ def simulate_adaptive(config: Config, dataset: Dataset, user_id, target_item_id,
     _no_pref_replies = load_prompts(config).get('adaptive_no_preference', [])
     _no_pref_pool = random.sample(_no_pref_replies, len(_no_pref_replies)) if _no_pref_replies else []
 
+    rounds = 0
+    stopped_by_round_limit = False
     while rec_attempts < config['max_rec_attempts'] and not conversation_ended:
+        rounds += 1
+        if _round_limit_reached(config, rounds, 'static' if not attribute_by_openai else 'adaptive',
+                                user_id, target_item_id):
+            stopped_by_round_limit = True
+            break
         # Ask a clarifying question if quota not exceeded and attributes remain
         remaining = [a for a in candidate_attributes if a not in asked_attributes]
         max_questions = int(config.get('max_questions') or 99)
@@ -866,16 +961,16 @@ def simulate_adaptive(config: Config, dataset: Dataset, user_id, target_item_id,
                         f"Output only the question, no extra text."
                     )
                 }]
-                bot_msg = client_chat.chat.completions.create(
+                bot_msg = llm_calls.chat(client_chat, 'attribute_question',
                     model=config['chat_model'],
                     messages=_ctx_msgs,
                     temperature=0.7,
                     max_tokens=50,
                 ).choices[0].message.content.strip().strip('"').strip("'")
-            except Exception:
+            except Exception as e:
                 _pref_questions = load_prompts(config).get('adaptive_pref_questions', [])
                 _tmpl = random.choice(_pref_questions) if _pref_questions else "What is your preference for {attribute}?"
-                bot_msg = _tmpl.format(attribute=attr_display)
+                bot_msg = llm_calls.fallback('attribute_question', e, _tmpl.format(attribute=attr_display), config)
             chat_history.append({"role": "assistant", "content": bot_msg})
             write_chat_to_file(tmp_file, name_bot, bot_msg, config, "bot")
 
@@ -897,14 +992,14 @@ def simulate_adaptive(config: Config, dataset: Dataset, user_id, target_item_id,
         if disliked_context:
             dynamic_desc += disliked_context
         search_query = expand_query_for_search(config, client_chat, dynamic_desc) if config.get('expand_query') else dynamic_desc
-        emb = client_embeddings.embeddings.create(
+        emb = llm_calls.embed(client_embeddings, 'query_embedding',
             model=config['embeddings_model'], input=search_query
         ).data[0].embedding
-        s_constraints, s_ref_embs = _build_rec_constraints(user_context_text, es, config)
-        # Skip the relevance gate when no more questions can be asked — forces a real recommendation
-        # instead of repeated "no match" messages, which creates consecutive Bot messages.
+        s_constraints, s_ref_embs = _build_rec_constraints(user_context_text, backend, config)
+        # Recommend after every round, also when no more questions can be asked. The τ gate still applies
+        # inside the retrieval (search_items_by_embedding); no code path skips it.
         conversation_ended, succeed, disliked_context, had_results, items_shown = _do_recommendation(
-            config, client_chat, es, emb, target_title, target_item_id, item_row,
+            config, client_chat, backend, emb, target_title, target_item_id, item_row,
             profile, chat_history, rejected_item_ids, previous_rejections, disliked_context,
             rec_attempts, user_long_emb, user_short_emb, excluded_ids, tmp_file, name_bot, name_user, used_chit_chat,
             query_text=search_query, search_constraints=s_constraints, reference_embeddings=s_ref_embs,
@@ -916,7 +1011,8 @@ def simulate_adaptive(config: Config, dataset: Dataset, user_id, target_item_id,
             number_turns += 1
 
     if not conversation_ended:
-        _end_failed(tmp_file, name_bot, name_user, target_title, target_item_id, config=config, client_chat=client_chat, chat_history=chat_history)
+        _end_failed(tmp_file, name_bot, name_user, target_title, target_item_id, config=config, client_chat=client_chat, chat_history=chat_history,
+                    round_limit=stopped_by_round_limit)
         number_turns += 1
 
     _save_conversation(chat_folder, user_id, target_item_id, number_turns, shown_recs, succeed, timestamp, tmp_file)

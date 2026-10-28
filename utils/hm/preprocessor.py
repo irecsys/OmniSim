@@ -1,7 +1,10 @@
 """
 H&M dataset preprocessor.
 
-Reads raw hm.csv and produces a cleaned items.csv ready for ES indexing.
+Reads a raw H&M product export and writes the cleaned catalogue used to build the local index
+(the shipped data/hm/hm.csv was produced this way; the raw export is not shipped). Pass --input and
+--output explicitly: the defaults (--input data/hm/hm.csv, --output data/hm/items.csv) do not match
+this pipeline.
 
 Key transformation:
   mainCatCode (e.g. "ladies_cardigansjumpers_jumpers")
@@ -13,8 +16,7 @@ Output description (used as embedding text):
   "{gender_type} | {brandName} | {colorName} | ${price} | {details}"
 
 Usage:
-    python datasets/hm/preprocessor.py
-    python datasets/hm/preprocessor.py --input data/hm/raw_handm.csv --output data/hm/hm.csv
+    python utils/hm/preprocessor.py --input <raw export>.csv --output data/hm/hm.csv
 """
 
 import argparse

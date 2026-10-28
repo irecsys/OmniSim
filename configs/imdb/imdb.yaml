@@ -7,10 +7,6 @@
 # ============================================================
 
 
-# ── Elasticsearch index ───────────────────────────────────────
-es_index: imdb-2025
-
-
 # ── Dataset ───────────────────────────────────────────────────
 dataset: imdb
 file_items:        items.csv           # item metadata (required)
@@ -37,8 +33,8 @@ embedding_fields: ["genres", "title", "overview", "release_year",
 precomputed_embedding_col: embedding_vector
 
 
-# ── BM25 field (paper Eq. 5) ──────────────────────────────────
-# Per Eq. 5, BM25 scores the query against ONE aggregated "details" field
+# ── BM25 field ──────────────────────────────────
+# For the base score, BM25 scores the query against ONE aggregated "details" field
 # (M_i,d = concatenation of all item attributes), built automatically at
 # index time as `bm25_details` from `embedding_fields` above.
 # Override the field name here only if you indexed it under a different name.
@@ -46,8 +42,8 @@ bm25_details_field: bm25_details
 
 
 # ── Item attributes ───────────────────────────────────────────
-# Attributes fetched from ES and surfaced to the simulated agents.
-# Keys must match field names in the ES index.
+# Attributes the agent can ask about. Keys that are columns of the items CSV (stored in the local
+# index) are answered from the item's value; other keys are answered by the LLM from the item's text.
 default_attributes: ["adult", "original_language", "release_year", "spoken_languages"]
 
 item_attributes:

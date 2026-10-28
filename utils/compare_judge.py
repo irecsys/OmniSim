@@ -1,7 +1,7 @@
 """
-evaluation/compare_judge.py
+utils/compare_judge.py
 ─────────────────────────────────────────────────────────────────────
-Compare LLM-as-Judge scores between SimuConv simulated conversations
+Compare LLM-as-Judge scores between OmniSim simulated conversations
 and matched ReDial real conversations, across all three modes.
 
 For each mode (free / static / adaptive):
@@ -16,13 +16,12 @@ Output files:
   results/judge_comparison.csv      — descriptive statistics comparison
 
 Usage:
-    python evaluation/compare_judge.py --modes free static adaptive --limit 20
-    python evaluation/compare_judge.py --modes adaptive --limit 10 --provider thetaedgecloud
+    python utils/compare_judge.py --modes free static adaptive --limit 20
+    python utils/compare_judge.py --modes adaptive --limit 10 --provider thetaedgecloud
 """
 
 import os
 import sys
-import json
 import random
 import argparse
 import pandas as pd
@@ -31,6 +30,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.judge import evaluate_folder, _build_client
+from utils.dialogue_files import is_tmp_dialogue
 
 CHATS_ROOT   = "chats/imdb"
 REAL_DIR     = "chats/redial/real"
@@ -57,7 +57,7 @@ def latest_run_folder(mode: str) -> str | None:
     runs = sorted(
         [r for r in os.listdir(base)
          if os.path.isdir(os.path.join(base, r))
-         and any(f.endswith(".txt") and "tmp" not in f
+         and any(f.endswith(".txt") and not is_tmp_dialogue(f)
                  for f in os.listdir(os.path.join(base, r)))],
         reverse=True,
     )
@@ -67,7 +67,7 @@ def latest_run_folder(mode: str) -> str | None:
 def sample_real(n: int, succeed_ratio: float, seed: int = 42) -> list[str]:
     """Return N file paths from REAL_DIR matching succeed_ratio as closely as possible."""
     random.seed(seed)
-    all_files = [f for f in os.listdir(REAL_DIR) if f.endswith(".txt")]
+    all_files = [f for f in os.listdir(REAL_DIR) if f.endswith(".txt") and not is_tmp_dialogue(f)]
     succeed  = [f for f in all_files if "-1-" in f.rsplit("-", 2)[1] or f.endswith("-1-" + f.split("-")[-1])]
     fail     = [f for f in all_files if f not in succeed]
 
@@ -121,7 +121,7 @@ def make_comparison_table(sim_df: pd.DataFrame, real_df: pd.DataFrame,
         rows.append({
             "Mode":      mode.capitalize(),
             "Dimension": SCORE_LABELS.get(col, col),
-            # SimuConv
+            # OmniSim
             "Sim Mean":   round(s_sim["mean"], 3),
             "Sim Std":    round(s_sim["std"],  3),
             "Sim Median": round(s_sim["50%"],  2),
@@ -203,7 +203,7 @@ def run_comparison(modes: list[str], limit: int, provider: str, model: str,
                 continue
 
         # ── Descriptive stats ───────────────────────────────────
-        print(f"\n  ── Descriptive Statistics: SimuConv vs ReDial ({mode}) ──")
+        print(f"\n  ── Descriptive Statistics: OmniSim vs ReDial ({mode}) ──")
         sim_stats  = descriptive_stats(sim_df,  SCORE_COLS)
         real_stats = descriptive_stats(real_df, SCORE_COLS)
 
@@ -212,7 +212,7 @@ def run_comparison(modes: list[str], limit: int, provider: str, model: str,
             merged[f"Real {col}"] = real_stats[col].values
             merged[f"Sim {col}"]  = sim_stats[col].values
 
-        print("\n  SimuConv:")
+        print("\n  OmniSim:")
         print(sim_stats.to_string(index=False))
         print("\n  ReDial (real):")
         print(real_stats.to_string(index=False))
@@ -239,7 +239,7 @@ def run_comparison(modes: list[str], limit: int, provider: str, model: str,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Compare LLM-as-Judge scores: SimuConv vs ReDial per mode"
+        description="Compare LLM-as-Judge scores: OmniSim vs ReDial per mode"
     )
     parser.add_argument("--modes",    nargs="+", default=["free", "static", "adaptive"],
                         help="Modes to compare (default: all three)")

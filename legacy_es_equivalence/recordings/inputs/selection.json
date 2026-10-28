@@ -1,0 +1,59 @@
+{
+  "seed": 2025,
+  "generated": "2026-10-23T01:01:29",
+  "profiled_users": [
+    "u1",
+    "u2",
+    "u3",
+    "u4",
+    "u5",
+    "u6",
+    "u7",
+    "u9",
+    "u11",
+    "u12",
+    "u14",
+    "u15"
+  ],
+  "fixture_users": [
+    "u1",
+    "u2",
+    "u9",
+    "u11",
+    "u14"
+  ],
+  "fixture_moved_recent": {
+    "u1": {
+      "liked": 3,
+      "moved_recent": [
+        "tt0081455"
+      ]
+    },
+    "u2": {
+      "liked": 2,
+      "moved_recent": [
+        "tt0053849"
+      ]
+    },
+    "u9": {
+      "liked": 3,
+      "moved_recent": [
+        "tt0066214"
+      ]
+    },
+    "u11": {
+      "liked": 5,
+      "moved_recent": [
+        "tt0020142",
+        "tt0068677"
+      ]
+    },
+    "u14": {
+      "liked": 3,
+      "moved_recent": [
+        "tt0400063"
+      ]
+    }
+  },
+  "rule": "full eligible pool in seeded order; runs take a prefix (--limit). imdb_pairs interleaves profiled:unprofiled = 3:1."
+}

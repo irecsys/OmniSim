@@ -1,5 +1,5 @@
 """
-Convert ReDial real conversations → SimuConv-compatible TXT files.
+Convert ReDial real conversations → OmniSim-compatible TXT files.
 
 Each ReDial conversation becomes one .txt file in the same format as chats/:
     Bot: ...
@@ -7,7 +7,7 @@ Each ReDial conversation becomes one .txt file in the same format as chats/:
     ...
     System: <END> Session ended successfully. The target item '...' (movieId) was accepted by the user.
 
-Filename pattern (same as SimuConv):
+Filename pattern (same as OmniSim):
     {movieId}-{num_turns}-{rec_attempts}-{succeed}-{timestamp}.txt
 
 Mapping:
@@ -67,7 +67,7 @@ def replace_movie_refs(text: str, movie_mentions: dict, movies: dict) -> str:
 
 def convert_conversation(d: dict, movies: dict) -> dict | None:
     """
-    Convert one ReDial conversation dict into SimuConv fields.
+    Convert one ReDial conversation dict into OmniSim fields.
     Returns None if the conversation has no messages.
     """
     initiator_id = d['initiatorWorkerId']   # int, the seeker
@@ -142,7 +142,7 @@ def convert_conversation(d: dict, movies: dict) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description='Convert ReDial → SimuConv TXT format')
+    parser = argparse.ArgumentParser(description='Convert ReDial → OmniSim TXT format')
     parser.add_argument('--data_dir', default='data/redial',
                         help='Folder containing train_data.jsonl, test_data.jsonl, movies_with_mentions.csv')
     parser.add_argument('--output', default='chats/redial/real',

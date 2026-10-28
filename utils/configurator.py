@@ -10,7 +10,7 @@ over system defaults.  CLI overrides are applied on top.
 Usage::
 
     config = Config(['configs/imdb/imdb.yaml'])
-    es_index = config['es_index']
+    dataset = config['dataset']
     threshold = config.get('threshold_similarity', 0.3)
 """
 

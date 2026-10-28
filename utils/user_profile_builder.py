@@ -1,14 +1,14 @@
 """
-User Profile Builder — Requirement [2.1] + [2.2]
+User Profile Builder
 
 Generates user_profiles.csv by:
-  [2.1] users.csv  -> LLM produces {user_demographic} summary
-  [2.2] interactions.csv -> based on rating threshold, produces:
-          {user_likes_long}, {user_dislikes_long}    (all-time)
-          {user_likes_short}, {user_dislikes_short}  (last N days, if timestamp available)
+  users.csv        -> LLM produces the {user_demographic} summary
+  interactions.csv -> from the items rated above rating_threshold, produces:
+          {user_likes_long}     (all-time)
+          {user_likes_short}    (last short_term_days days, if the interactions have timestamps)
 
 Usage:
-    python utils/user_profile_builder.py --config user_imdb.yaml
+    python utils/user_profile_builder.py --config configs/imdb/imdb.yaml
 """
 
 import argparse
@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 # allow imports from project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from utils import llm_calls
 from utils.configurator import Config
 from utils.utils import get_openai_clients
 
@@ -28,9 +29,9 @@ from utils.utils import get_openai_clients
 # LLM helpers
 # ---------------------------------------------------------------------------
 
-def _llm(client_chat, config, prompt: str, max_tokens: int = 80) -> str:
+def _llm(client_chat, config, prompt: str, max_tokens: int = 80, site: str = 'profile_likes_long') -> str:
     try:
-        response = client_chat.chat.completions.create(
+        response = llm_calls.chat(client_chat, site,
             model=config['chat_model'],
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
@@ -38,8 +39,8 @@ def _llm(client_chat, config, prompt: str, max_tokens: int = 80) -> str:
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        print(f"  [LLM error] {e}")
-        return ""
+        print(f"  [LLM error] {llm_calls.sanitize(e)}")
+        return llm_calls.fallback(site, e, "", config)
 
 
 def _build_demographic(user_row: pd.Series) -> str:
@@ -58,7 +59,7 @@ def _build_demographic(user_row: pd.Series) -> str:
 
 
 def generate_demographic_summary(client_chat, config, user_row: pd.Series) -> str:
-    """[2.1] Convert a user's demographic columns into a 1-sentence natural language profile."""
+    """Convert a user's demographic columns into a 1-sentence natural language profile."""
     candidate_cols = [
         'birthyear', 'age', 'gender', 'nationality', 'country',
         'profession', 'occupation', 'education',
@@ -75,11 +76,11 @@ def generate_demographic_summary(client_chat, config, user_row: pd.Series) -> st
 Write a concise 1-sentence natural language profile.
 Example: "A 30-year-old female software engineer from Kuwait."
 Return only the sentence."""
-    return _llm(client_chat, config, prompt, max_tokens=60)
+    return _llm(client_chat, config, prompt, max_tokens=60, site='profile_demographic')
 
 
 def compute_feature_stats(subset: pd.DataFrame, col_category: str) -> dict:
-    """Step 3 — Count feature frequencies from liked item metadata."""
+    """Count feature frequencies from liked item metadata."""
     stats = {}
 
     # Genre / category counts (split by comma if multiple genres per item)
@@ -108,8 +109,9 @@ def compute_feature_stats(subset: pd.DataFrame, col_category: str) -> dict:
 
 
 def generate_preference_summary(client_chat, config, liked_ids: list, items_df: pd.DataFrame,
-                                 col_itemid: str, col_title: str, col_category: str) -> str:
-    """[2.2] Step 2-5: join metadata → count features → LLM summarization."""
+                                 col_itemid: str, col_title: str, col_category: str,
+                                 site: str = 'profile_likes_long') -> str:
+    """Preference summary of the liked items: join their metadata, count features, summarise with the LLM."""
     if not liked_ids:
         return ""
 
@@ -117,12 +119,12 @@ def generate_preference_summary(client_chat, config, liked_ids: list, items_df: 
     if subset.empty:
         return ""
 
-    # Step 3: compute feature statistics
+    # compute feature statistics
     stats = compute_feature_stats(subset, col_category)
     if not stats:
         return ""
 
-    # Step 4 → Step 5: pass structured stats to LLM
+    # pass the structured stats to the LLM
     domain = config.get("role_bot", "recommender")
     prompt = f"""Based on a user's liked items with the following feature statistics:
 
@@ -132,7 +134,7 @@ Sample titles: {stats.get('sample_titles', [])}
 
 Summarize the user's preferences in 1-2 sentences for a {domain} system.
 Return only the summary."""
-    return _llm(client_chat, config, prompt, max_tokens=80)
+    return _llm(client_chat, config, prompt, max_tokens=80, site=site)
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +142,13 @@ Return only the summary."""
 # ---------------------------------------------------------------------------
 
 def build_user_profiles(config_file_list: list):
+    """Build the user profiles of the dataset in the config: user_demographic from the users file, and
+    user_likes_long / user_likes_short from the liked items (rating > rating_threshold) in the interactions
+    file, summarised by the LLM. With a timestamp column, user_likes_short covers the last short_term_days
+    days and falls back to user_likes_long when that window has no liked item; without one, it is an empty
+    string. Returns (profiles_df, failures), failures being (user id, call site, error type) of failed LLM
+    calls; data/{dataset}/user_profiles.csv is written only when there are none. Returns None when neither
+    the users file nor the interactions file exists."""
     config = Config(config_file_list=config_file_list)
     client_chat, _ = get_openai_clients(config)
 
@@ -201,9 +210,12 @@ def build_user_profiles(config_file_list: list):
         short_term_cutoff = datetime.now() - timedelta(days=short_term_days)
 
     profiles = []
+    failures = []                      # [(user id, call site, error type)] of failed LLM calls
+    log = llm_calls.fallback_log()
     total = len(user_ids)
     for i, uid in enumerate(user_ids):
         print(f"  [{i+1}/{total}] user {uid}", end="  ")
+        n_logged = len(log)
 
         profile = {
             'userid': uid,
@@ -212,7 +224,7 @@ def build_user_profiles(config_file_list: list):
             'user_likes_short': '',
         }
 
-        # --- [2.1] Demographic summary ---
+        # --- Demographic summary ---
         if users_df is not None:
             row_df = users_df[users_df[col_userid] == uid]
             if not row_df.empty:
@@ -221,7 +233,7 @@ def build_user_profiles(config_file_list: list):
                 )
                 print(f"demo=OK", end="  ")
 
-        # --- [2.2] Preference summary from interactions ---
+        # --- Preference summary from interactions ---
         if interactions_df is not None:
             user_inter = interactions_df[interactions_df[col_userid] == uid]
 
@@ -238,7 +250,8 @@ def build_user_profiles(config_file_list: list):
                     short_inter = user_inter[user_inter['_ts'] >= short_term_cutoff]
                     liked_short = short_inter[short_inter[col_rating] > rating_threshold][col_itemid].tolist()
                     profile['user_likes_short'] = generate_preference_summary(
-                        client_chat, config, liked_short, items_df, col_itemid, col_title, col_category
+                        client_chat, config, liked_short, items_df, col_itemid, col_title, col_category,
+                        site='profile_likes_short'
                     )
                     # Fallback: no recent ratings → copy long-term preference
                     if not profile['user_likes_short']:
@@ -248,13 +261,20 @@ def build_user_profiles(config_file_list: list):
                         print(f"short=OK", end="  ")
 
         print()
+        failures += [(uid, site, err) for site, err in log[n_logged:]]
         profiles.append(profile)
 
-    # Save
+    # Save — only complete profiles: a failed LLM call leaves a field empty, and a cached empty field would be
+    # reused by every later run
     profiles_df = pd.DataFrame(profiles)
     output_path = os.path.join(data_path, 'user_profiles.csv')
-    profiles_df.to_csv(output_path, index=False)
-    print(f"\nSaved {len(profiles)} user profiles -> {output_path}")
+    if failures:
+        print(f"\n{len(failures)} LLM call(s) failed for users {sorted({str(u) for u, _, _ in failures})}: "
+              f"{output_path} not written")
+    else:
+        profiles_df.to_csv(output_path, index=False)
+        print(f"\nSaved {len(profiles)} user profiles -> {output_path}")
+    return profiles_df, failures
 
 
 # ---------------------------------------------------------------------------
@@ -267,4 +287,5 @@ if __name__ == '__main__':
                         help='Config YAML file (default: user.yaml)')
     args, _ = parser.parse_known_args()
     config_file_list = args.config.strip().split(' ')
-    build_user_profiles(config_file_list)
+    _, failures = build_user_profiles(config_file_list) or (None, [])
+    sys.exit(3 if failures else 0)          # 3: LLM calls failed, nothing written

@@ -1,0 +1,33 @@
+{
+  "inputs_by_kind": {
+    "beta0": 81,
+    "early_return": 12,
+    "year_range": 53,
+    "genre_filter": 28,
+    "excluded_ids": 29,
+    "ref_blend": 12
+  },
+  "records_by_kind": {
+    "beta0": 243,
+    "early_return": 12,
+    "year_range": 159,
+    "genre_filter": 84,
+    "excluded_ids": 87,
+    "ref_blend": 36
+  },
+  "records_total": 621,
+  "ref_lookups": 25,
+  "guest_samples": {
+    "A-imdb": 100,
+    "A-hm": 100
+  },
+  "lambdas": [
+    0.3,
+    0.0,
+    1.0
+  ],
+  "tau_run": 0.0,
+  "seed": 20261023,
+  "problems": 0,
+  "problem_detail": []
+}

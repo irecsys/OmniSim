@@ -1,26 +1,31 @@
 # Core
-numpy>=1.23.5
-pandas>=1.5.2
-pyyaml>=6.0
-python-dotenv>=1.0.0
+numpy>=1.23.5,<3
+pandas>=1.5.2,<3
+pyyaml>=6.0,<7
+python-dotenv>=1.0.0,<2
 
 # Logging
-colorlog>=4.7.2
-colorama>=0.4.6
+colorlog>=4.7.2,<7
+colorama>=0.4.6,<1
 
 # LLM & Embeddings
-openai>=2.15.0
-sentence-transformers>=2.2.0
+openai>=2.15.0,<4
+# Optional, not installed by default: sentence-transformers, for embeddings_provider: sentence-transformers
+# (vectors computed locally, no API key) and for the cosine diversity of the evaluation tools.
+# It also installs PyTorch. Install it separately when needed (see README, Optional: local embeddings):
+#   pip install "sentence-transformers>=2.2.0,<7"
 
 # Retrieval
-elasticsearch>=8.13.0,<9.0.0
+rapidfuzz>=3,<4       # reference-title fuzzy matching (utils/retrieval/ref_lookup.py)
 
 # HTTP
-requests>=2.28.0
+requests>=2.28.0,<3
 
 # Metrics
-scikit-learn>=1.2.0
+scikit-learn>=1.2.0,<2
+scipy>=1.9,<2            # imported directly (legacy_es_equivalence/replay_fixtures.py)
+lexical_diversity>=0.1.1,<0.2 # scripts/compute_nlp_metrics.py
+setuptools<81            # lexical_diversity 0.1.1 needs pkg_resources, removed in setuptools 81
 
-# Dashboard (optional — only needed for `streamlit run UI/dashboard.py`)
-streamlit>=1.32.0
-plotly>=5.18.0
+# Testing
+pytest>=8,<10

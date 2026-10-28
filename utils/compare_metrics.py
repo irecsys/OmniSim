@@ -1,5 +1,5 @@
 """
-Comparison Metrics for SimuConv vs. Real Conversations.
+Comparison Metrics for OmniSim vs. Real Conversations.
 
 Supports three categories of metrics:
 
@@ -37,6 +37,7 @@ import warnings
 from collections import Counter
 
 import numpy as np
+from utils.dialogue_files import is_tmp_dialogue
 
 warnings.filterwarnings('ignore')
 
@@ -46,10 +47,10 @@ warnings.filterwarnings('ignore')
 # ---------------------------------------------------------------------------
 
 def _load_utterances(folder: str, speakers: tuple = ('Bot', 'User')) -> list[str]:
-    """Return all utterance texts from a folder of SimuConv TXT files."""
+    """Return all utterance texts from a folder of OmniSim TXT files."""
     texts = []
     for fname in sorted(os.listdir(folder)):
-        if not fname.endswith('.txt') or 'tmp' in fname:
+        if not fname.endswith('.txt') or is_tmp_dialogue(fname):
             continue
         with open(os.path.join(folder, fname), encoding='utf-8') as f:
             for line in f:
@@ -261,7 +262,7 @@ def item_mention_entropy(folder: str) -> float:
     """
     counts: Counter = Counter()
     for fname in sorted(os.listdir(folder)):
-        if not fname.endswith('.txt') or 'tmp' in fname:
+        if not fname.endswith('.txt') or is_tmp_dialogue(fname):
             continue
         with open(os.path.join(folder, fname), encoding='utf-8') as f:
             for line in f:
@@ -283,6 +284,8 @@ def _conv_stats(folder: str) -> dict:
     pattern = _re.compile(r'-(\d+)-(\d+)-([01])-\d+\.txt$')
     turns_list, succeed_list = [], []
     for fname in os.listdir(folder):
+        if is_tmp_dialogue(fname):
+            continue
         m = pattern.search(fname)
         if m:
             turns_list.append(int(m.group(1)))
@@ -353,11 +356,11 @@ def analyze_folder(folder: str, label: str = '') -> dict:
 
 def compare_folders(sim_folder: str, real_folder: str, output_csv: str | None = None):
     """Compute metrics for both folders and print a gap report."""
-    sim_r  = analyze_folder(sim_folder,  label='SimuConv (generated)')
+    sim_r  = analyze_folder(sim_folder,  label='OmniSim (generated)')
     real_r = analyze_folder(real_folder, label='ReDial (real human)')
 
     print(f"\n{'='*60}")
-    print("=== Gap Report (|SimuConv − Real|) ===")
+    print("=== Gap Report (|OmniSim − Real|) ===")
 
     def gap(key, name, higher_better=True):
         s, r = sim_r[key], real_r[key]
@@ -397,7 +400,7 @@ def compare_folders(sim_folder: str, real_folder: str, output_csv: str | None = 
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Diversity & comparison metrics for SimuConv')
+    parser = argparse.ArgumentParser(description='Diversity & comparison metrics for OmniSim')
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--folder', type=str,
                        help='Single folder to analyze (no-reference metrics only)')

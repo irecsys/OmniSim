@@ -3,9 +3,6 @@
 # Overrides system.yaml defaults. See configs/system/system.yaml for all options.
 # ============================================================
 
-# ElasticSearch
-es_index: hm-2025
-
 # Dataset
 dataset: hm
 file_items: hm.csv
@@ -24,11 +21,16 @@ col_details: details         # raw product description (style, fit, features)
 # then name/color/details for style/semantic matching)
 embedding_fields: ["gender", "item_type", "productName", "colorName", "details"]
 
-# ES field types for filtering
-keyword_fields: ["gender", "item_type"]   # exact-match filters (e.g. gender=Women)
-numeric_fields: ["price"]                 # range filters (e.g. price <= 50)
+# Column in hm.csv that stores pre-computed embedding vectors.
+# Set to null to recompute embeddings at index-build time.
+precomputed_embedding_col: embedding_vector
 
-# BM25 field (paper Eq. 5): query is scored against ONE aggregated "details"
+# Extra columns stored in the local index (numeric_fields are stored as numbers);
+# retrieval does not filter on them
+keyword_fields: ["gender", "item_type"]
+numeric_fields: ["price"]
+
+# BM25 field: query is scored against ONE aggregated "details"
 # field (M_i,d = all attributes concatenated), built at index time as
 # `bm25_details` from `embedding_fields`. Override the name here if needed.
 bm25_details_field: bm25_details
@@ -85,5 +87,5 @@ input_users_file: configs/hm/inputs/test_users.csv
 chats_per_entry: 1
 num_workers: 3       # Theta API limit — keep low to avoid 409 Conflict
 
-# Strategy 4: fully random  (anonymous user, randomly sampled items from ES)
+# Strategy 4: fully random  (anonymous user, randomly sampled items from the items CSV)
 guestuser_randomitem_records: 40

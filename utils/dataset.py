@@ -77,12 +77,12 @@ class Dataset(object):
           ``users_as_guest`` is True (guest sessions need no history).
 
         The item-ID column is cast to ``str`` so it matches the string IDs
-        returned by Elasticsearch.
+        returned by the local index.
         """
         # load item information (optional for user_guest strategy)
         if self._is_empty(self.file_items):
             self.df_items = pd.DataFrame()
-            self.logger.info('No items file provided — items will be fetched from Elasticsearch.')
+            self.logger.info('No items file provided — items will be fetched from the retrieval index.')
         else:
             csv_path = os.path.join(self.config["path_inputs"], self.file_items)
             self.df_items = pd.read_csv(csv_path, header=0, low_memory=False)

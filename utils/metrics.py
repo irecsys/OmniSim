@@ -1,9 +1,9 @@
 """
-Metrics — Requirement [6]
+Metrics
 
 Computes conversation-level and utterance-level metrics for a run folder.
 
-Filename pattern:  {item_id}-{number_turns}-{rec_attempts}-{succeed}-{timestamp}.txt
+Filename pattern:  {user_id}-{item_id}-{number_turns}-{rec_attempts}-{succeed}-{timestamp}.txt
 
 Conversation-level metrics:
   - total conversations, success rate, avg turns, avg rec_attempts
@@ -22,7 +22,9 @@ import os
 import re
 import argparse
 import pandas as pd
-from collections import defaultdict
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # run as a script
+from utils.dialogue_files import is_fallback_line, is_tmp_dialogue
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +65,9 @@ def parse_utterances(file_path: str) -> list[dict]:
             # Skip recommendation list items (lines starting with "- ")
             if line.startswith('- '):
                 continue
+            # Skip the <FALLBACK> line: not an utterance
+            if is_fallback_line(line):
+                continue
             # Format: "SpeakerName: message text"
             if ': ' in line:
                 speaker, _, text = line.partition(': ')
@@ -79,6 +84,10 @@ def parse_utterances(file_path: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def compute_metrics(folder_path: str, output_csv: str | None = None):
+    """Statistics of the conversation .txt files in folder_path (tmp files skipped): success rate, turns,
+    recommendation attempts and utterance counts per speaker, printed. Returns a DataFrame with one row per
+    conversation (user_id, item_id, num_turns, rec_attempts, succeed, timestamp), saved to output_csv if
+    given; None if the folder does not exist or holds no conversation file."""
     if not os.path.isdir(folder_path):
         print(f"Folder not found: {folder_path}")
         return
@@ -87,7 +96,7 @@ def compute_metrics(folder_path: str, output_csv: str | None = None):
     utt_records = []
 
     for fname in sorted(os.listdir(folder_path)):
-        if not fname.endswith('.txt') or 'tmp' in fname:
+        if not fname.endswith('.txt') or is_tmp_dialogue(fname):
             continue
         parsed = parse_filename(fname)
         if parsed is None:
@@ -151,7 +160,7 @@ def compute_metrics(folder_path: str, output_csv: str | None = None):
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Compute metrics for a SimuConv run folder')
+    parser = argparse.ArgumentParser(description='Compute metrics for an OmniSim run folder')
     parser.add_argument('--folder', type=str, required=True,
                         help='Path to the run folder (e.g. chats/imdb/adaptive/20250904102301)')
     parser.add_argument('--output', type=str, default=None,

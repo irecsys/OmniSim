@@ -28,32 +28,52 @@ seed: 2025
 num_workers: 8          # parallel threads (I/O-bound — LLM API calls)
 max_questions: 3        # max clarifying turns before forcing a recommendation
 library_name: OmniSim
-library_version: 1.0
+library_version: "2.0.0"
 log_path_outputs: logs/
 data_path: data/
 
 
 # ── LLM provider ─────────────────────────────────────────────
-# Options: openai | azure | thetaedgecloud
-# For Azure also set: azure_openai_endpoint, azure_openai_api_version
-# For self-hosted OpenAI-compatible models set: openai_api_base
+# Options: openai | azure | azure_foundry | thetaedgecloud
+#   openai          OPENAI_KEY in .env; chat_model = OpenAI model name.
+#   azure           AZURE_KEY in .env; chat_endpoint = Azure OpenAI resource root,
+#                   chat_api_version; chat_model = deployment name.
+#   azure_foundry   AZURE_KEY in .env; chat_endpoint = the OpenAI-compatible base URL of the Azure
+#                   AI Foundry project (.../openai/v1); chat_model = deployment name;
+#                   chat_api_version is not used. There is no azure_foundry embeddings client:
+#                   set embeddings_provider below explicitly.
+#   thetaedgecloud  THETA_KEY in .env; chat_model is turned into the Theta model slug, and the URL is
+#                   built in _ThetaCompletions.create as
+#                   https://ondemand.thetaedgecloud.com/infer_request/{slug}/completions,
+#                   so chat_endpoint / chat_api_version are not used. Theta has no embeddings:
+#                   set embeddings_provider below explicitly.
 openai_provider: azure
-chat_model: gpt-4o-mini
+chat_model: gpt-4o-mini                     # azure: the deployment name in your Azure resource
 chat_endpoint: https://YOUR_RESOURCE.openai.azure.com/
 chat_api_version: "2024-02-01"
 
 
 # ── Embeddings provider ───────────────────────────────────────
-# Options: openai | azure | thetaedgecloud | sentence-transformers
-# sentence-transformers runs locally (no API key required).
+# Options: openai | azure | sentence-transformers (default: the same as openai_provider)
+#   openai                 OPENAI_KEY in .env; embeddings_model = OpenAI model name.
+#   azure                  AZURE_KEY in .env; embeddings_endpoint = Azure OpenAI resource root,
+#                          embeddings_api_version; embeddings_model = deployment name.
+#   sentence-transformers  runs locally, no API key; embeddings_model = model name
+#                          (default all-MiniLM-L6-v2). Optional package, not in requirements.txt:
+#                          pip install "sentence-transformers>=2.2.0,<7"
+#   thetaedgecloud is accepted but returns no vector; azure_foundry has no embeddings client.
+#
+# IMPORTANT: items.csv / hm.csv ship pre-computed 1536-dim vectors produced by
+# text-embedding-3-small. Query embeddings MUST come from the same model: the local index
+# rejects a query vector of another dimension. Do not switch this to
+# sentence-transformers without re-computing every item vector.
+# ── Embeddings provider ───────────────────────────────────────
 embeddings_provider: azure
-embeddings_model: text-embedding-3-small
+embeddings_model: text-embedding-3-small      # azure: the deployment name in your Azure resource
+# azure: the resource root only. The SDK requests
+#   {embeddings_endpoint}openai/deployments/{embeddings_model}/embeddings?api-version={embeddings_api_version}
 embeddings_endpoint: https://YOUR_RESOURCE.openai.azure.com/
 embeddings_api_version: "2024-02-01"
-
-
-# ── Elasticsearch ─────────────────────────────────────────────
-es_host: http://localhost:9200
 
 
 # ── Default column names ──────────────────────────────────────
@@ -71,31 +91,42 @@ col_details:  details
 
 # ── Simulation ────────────────────────────────────────────────
 mode_refinement: free     # Dialogue mode: free | static | adaptive
-threshold_similarity: 0.3 # Minimum normalised cosine score S̃_cos to keep a candidate
-max_similar_items: 10     # Top-k candidates fetched from ES per dialogue turn
+threshold_similarity: 0.3 # τ — gate on max(S̃_base) across retrieved candidates
+                          # (applied in local_search.search_items_local; α/β do NOT affect this gate)
+max_similar_items: 10     # Top-k items returned by each retrieval call (kNN takes 3 × top-k candidates)
 max_rec_attempts: 6       # Max recommendation rounds before ending the dialogue
+max_total_rounds: 30      # Stop-loss: end the dialogue as failed (succeed=0) after this many main-loop
+                          # rounds. A loop that never shows items again would otherwise
+                          # run forever; normal dialogues need at most max_questions + max_rec_attempts rounds
+                          # (at most 6 in the v1 / v2 dialogues of the migration comparison)
 rec_top_n: 1              # Number of items presented per recommendation turn
 expand_query: true        # LLM expands user text into richer search keywords before embedding
+on_llm_error: fallback    # What a failed LLM call does. fallback: as v1, the call is replaced
+                          # by fallback text; every fallback is logged (WARNING), the conversation file ends with a
+                          # System: <FALLBACK> line and run.py exits with 3. fail: the conversation stops and is kept
+                          # as <tmp name>.aborted, no further conversation is started (the rest are 'skipped' in the
+                          # run summary), running ones finish or stop the same way; run.py exits with 3.
+                          # Calls without fallback text (query embedding, ...) stop the conversation in both modes.
 
 
-# ── Hybrid scoring (Equations 3–6 in the paper) ──────────────
+# ── Hybrid scoring (see 'Retrieval and scoring' in README.md) ──
 #
-# Eq. 5 — Base retrieval score:
+# Base retrieval score:
 #   S̃_base(q, i) = λ · S̃_BM25(q, M_i,d) + (1 − λ) · S̃_cos(q, i)
 #
-# Eq. 6 — Hybrid score (with user profile):
+# Hybrid score (with user profile):
 #   S̃_hybrid = α · S̃_base + (1 − α) · [β · S̃_cos(i, p_short) + (1 − β) · S̃_cos(i, p_long)]
 #
-# Score normalisation (Eq. 4):
+# Score normalisation:
 #   Cosine → S̃ = (s + 1) / 2          (maps [-1,1] to [0,1])
 #   BM25   → S̃ = (s − s_min) / (s_max − s_min)   (min-max)
 #
 # Notes:
 #   • If no user profile is available, α is set to 1 internally (pure retrieval).
 #   • If interactions.csv has no timestamps, β is set to 0 (long-term only).
-lambda_bm25:             0.3   # λ — BM25 weight in Eq. 5
-weight_es_score:         0.7   # α — base-score weight in Eq. 6
-weight_user_taste_short: 0.3   # β — short-term preference ratio in Eq. 6
+lambda_bm25:             0.3   # λ — BM25 weight in the base score
+weight_es_score:         0.7   # α — base-score weight in the hybrid score
+weight_user_taste_short: 0.3   # β — short-term preference ratio in the hybrid score
 
 
 # ── Conversational behaviour ──────────────────────────────────
@@ -110,6 +141,11 @@ bot_short_followup_ratio:    0.4   # probability of a short (1–5 word) bot fol
 # ── User profile builder ──────────────────────────────────────
 rating_threshold: 3    # interactions with rating > threshold counted as "liked"
 short_term_days:  30   # number of recent days that define the short-term window
+                       # NOTE: the cutoff is datetime.now() - short_term_days
+                       # (user_profile_builder.py:201). IMDB interactions end in
+                       # 2020, so this window is always empty and user_likes_short
+                       # falls back to user_likes_long (:245). Known v1 behaviour —
+                       # do NOT fix during the v2 migration.
 
 
 # ── Output ────────────────────────────────────────────────────

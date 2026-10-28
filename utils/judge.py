@@ -1,5 +1,5 @@
 """
-evaluation/judge.py — LLM-as-Judge evaluator for SimuConv simulated conversations.
+utils/judge.py — LLM-as-Judge evaluator for OmniSim simulated conversations.
 
 Evaluates the simulated USER's behaviour across three dimensions:
   1. Language Fluency      (Grammar, Fluency, Naturalness, Tone)
@@ -9,16 +9,16 @@ Evaluates the simulated USER's behaviour across three dimensions:
 Each dimension is scored 1–5 with a Chain-of-Thought rationale before the score.
 
 Usage:
-    python evaluation/judge.py \\
-        --folder chats/imdb/adaptive/user_item_pairs/20260320192656
+    python utils/judge.py \\
+        --folder chats/imdb/adaptive/user_item_pairs/<run_timestamp>
 
-    python evaluation/judge.py \\
-        --folder chats/imdb/adaptive/user_item_pairs/20260320192656 \\
+    python utils/judge.py \\
+        --folder chats/imdb/adaptive/user_item_pairs/<run_timestamp> \\
         --output results/judge_adaptive.csv \\
         --limit 20
 
-    python evaluation/judge.py \\
-        --folder chats/imdb/free/user_item_pairs/20260319003702 \\
+    python utils/judge.py \\
+        --folder chats/imdb/free/user_item_pairs/<run_timestamp> \\
         --model gpt-4o \\
         --output results/judge_free.csv
 """
@@ -31,6 +31,9 @@ import requests
 import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # run as a script
+from utils.dialogue_files import is_tmp_dialogue, split_fallback_line
 
 load_dotenv()
 
@@ -98,8 +101,12 @@ def _build_client(provider: str, model: str):
             api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
         )
     elif provider == "azure_foundry":
+        endpoint = os.getenv("AZURE_FOUNDRY_ENDPOINT")
+        if not endpoint:
+            raise ValueError("provider 'azure_foundry' needs the environment variable AZURE_FOUNDRY_ENDPOINT "
+                             "(the OpenAI-compatible base URL of your Azure AI Foundry project, ending in /openai/v1)")
         return OpenAI(
-            base_url=os.getenv("AZURE_FOUNDRY_ENDPOINT", "https://conv.services.ai.azure.com/api/projects/conv/openai/v1"),
+            base_url=endpoint,
             api_key=os.getenv("AZURE_KEY", ""),
         )
     elif provider == "deepseek":
@@ -311,7 +318,7 @@ def evaluate_folder(folder_path: str, client: OpenAI, model: str,
     eval_dir = os.path.join(folder_path, eval_subdir)
     os.makedirs(eval_dir, exist_ok=True)
 
-    txt_files = sorted([f for f in os.listdir(folder_path) if f.endswith('.txt')])
+    txt_files = sorted([f for f in os.listdir(folder_path) if f.endswith('.txt') and not is_tmp_dialogue(f)])
     if limit and limit > 0:
         txt_files = txt_files[:limit]
 
@@ -353,7 +360,10 @@ def evaluate_folder(folder_path: str, client: OpenAI, model: str,
         eval_fname = f"eval_{fname.replace('.txt', '.csv')}"
         eval_path  = os.path.join(eval_dir, eval_fname)
         with open(fpath, encoding='utf-8') as f:
-            dialogue = f.read().strip()
+            dialogue = f.read()
+        # the <FALLBACK> line is not shown to the judge; its count goes into the 'fallbacks' column
+        dialogue, n_fallbacks = split_fallback_line(dialogue)
+        dialogue = dialogue.strip()
         try:
             result = judge_dialogue(dialogue, client, model)
             lf  = result["Language_Fluency"]["score"]
@@ -367,6 +377,7 @@ def evaluate_folder(folder_path: str, client: OpenAI, model: str,
                 "succeed":                          parsed["succeed"],
                 "num_turns":                        parsed["num_turns"],
                 "rec_attempts":                     parsed["rec_attempts"],
+                "fallbacks":                        n_fallbacks,
                 "language_fluency":                 lf,
                 "language_fluency_rationale":       result["Language_Fluency"]["rationale"],
                 "conversational_quality":           cq,
@@ -427,13 +438,13 @@ def evaluate_folder(folder_path: str, client: OpenAI, model: str,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="LLM-as-Judge evaluator for SimuConv simulated user conversations"
+        description="LLM-as-Judge evaluator for OmniSim simulated user conversations"
     )
     parser.add_argument(
         "--folder",
         type=str,
         required=True,
-        help="Path to conversation folder (e.g. chats/imdb/adaptive/user_item_pairs/20260320192656)",
+        help="Path to conversation folder (e.g. chats/imdb/adaptive/user_item_pairs/<run_timestamp>)",
     )
     parser.add_argument(
         "--output",

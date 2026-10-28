@@ -1,11 +1,11 @@
 """
-compute_nlp_metrics.py — Compute all NLP metrics for OmniSim vs ReDial redial.
+compute_nlp_metrics.py — Compute all NLP metrics for OmniSim vs ReDial.
 
 Computes: Distinct-1/2, TTR variants (Root/Log/Maas/MSTTR/MATTR),
           MTLD/MTLD-MA, HDD, Cosine Diversity, Item Entropy,
           Avg Turns, Success Rate.
 
-Results saved to results/nlp_metrics_cache.csv (read by dashboard).
+Results saved to results/nlp_metrics_cache.csv.
 
 Usage:
     python scripts/compute_nlp_metrics.py
@@ -14,12 +14,16 @@ Usage:
     python scripts/compute_nlp_metrics.py --cosine-sample 300
 """
 import os
+import sys
 import re
 import math
 import argparse
 from collections import Counter
 
 import pandas as pd
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.dialogue_files import is_tmp_dialogue
 
 # ── Default paths ──────────────────────────────────────────────────────────
 RESULTS_DIR = "results"
@@ -32,7 +36,7 @@ def load_utterances(folder: str) -> list[str]:
     utts = []
     for root, _, files in os.walk(folder):
         for fname in files:
-            if not fname.endswith('.txt'):
+            if not fname.endswith('.txt') or is_tmp_dialogue(fname):    # tmp files are unfinished or duplicate conversations
                 continue
             try:
                 with open(os.path.join(root, fname), encoding='utf-8') as f:
@@ -95,6 +99,14 @@ def compute_ld_metrics(tokens: list[str]) -> dict:
 def compute_cosine_diversity(utts: list[str], n_sample: int = 200) -> float:
     try:
         from sentence_transformers import SentenceTransformer
+    except ImportError:
+        print('    [warn] sentence-transformers is not installed (optional: pip install "sentence-transformers>=2.2.0,<7"); '
+              'cosine diversity skipped (NaN)')
+        return float('nan')
+    except Exception as e:
+        print(f"    [warn] cosine diversity error: {e}")
+        return 0.0
+    try:
         import numpy as np
         model = SentenceTransformer('all-MiniLM-L6-v2')
         sample = utts[:n_sample]
@@ -112,7 +124,7 @@ def compute_item_entropy(folder: str) -> float:
     cnt = Counter()
     for root, _, files in os.walk(folder):
         for fname in files:
-            if fname.endswith('.txt'):
+            if fname.endswith('.txt') and not is_tmp_dialogue(fname):
                 parts = fname.replace('.txt', '').split('-')
                 if len(parts) >= 2:
                     cnt[parts[1]] += 1
@@ -197,7 +209,7 @@ def main():
         for fd in folder_list:
             for root, _, files in os.walk(fd):
                 for fname in files:
-                    if fname.endswith('.txt') and 'tmp' not in fname:
+                    if fname.endswith('.txt') and not is_tmp_dialogue(fname):
                         all_files.append(os.path.join(root, fname))
         print(f"  Total files across folders: {len(all_files)}")
         utts = []

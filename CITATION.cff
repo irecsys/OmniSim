@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use OmniSim in your research, please cite the paper below."
+title: "OmniSim"
+type: software
+version: 2.0.0
+license: Apache-2.0
+repository-code: "https://github.com/irecsys/OmniSim"
+authors:
+  - family-names: Zheng
+    given-names: Yong
+    orcid: "https://orcid.org/0000-0003-4990-4580"
+  - family-names: Zhang
+    given-names: Jian
+    orcid: "https://orcid.org/0009-0004-9281-8869"
+preferred-citation:
+  type: conference-paper
+  title: "OmniSim: A LLM-Powered Open-Source Simulator for Generating Personalized and Adaptive Conversational Recommendation Dialogues"
+  authors:
+    - family-names: Zheng
+      given-names: Yong
+    - family-names: Zhang
+      given-names: Jian
+  collection-title: "Proceedings of the 34th ACM Conference on User Modeling, Adaptation and Personalization (UMAP '26)"
+  conference:
+    name: "UMAP '26"
+    city: Gothenburg
+    country: SE
+    date-start: 2026-06-08
+    date-end: 2026-06-11
+  publisher:
+    name: ACM
+  doi: 10.1145/3774935.3812730
+  year: 2026

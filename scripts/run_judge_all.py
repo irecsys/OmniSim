@@ -1,15 +1,19 @@
 """
-Run LLM-as-Judge evaluation for all 6 conversation groups × 3 judge models.
+Run LLM-as-Judge evaluation (utils/judge.py) for several groups of conversations with several judge models.
+
+GROUPS maps a group name to a folder of conversation files, and JUDGES maps a judge name to its provider,
+model and number of parallel workers; edit both for your own runs. The values in this file are an example
+(the paper's setting: six simulated groups, two simulator models x three modes, plus the ReDial baseline).
 
 Usage:
     python scripts/run_judge_all.py
     python scripts/run_judge_all.py --limit 50
-    python scripts/run_judge_all.py --judges gpt deepseek
-    python scripts/run_judge_all.py --groups llama_free gpt_adaptive
+    python scripts/run_judge_all.py --judges <judge> [<judge> ...]
+    python scripts/run_judge_all.py --groups <group> [<group> ...]
 
 Outputs:
-    results/judge_{sim_model}_{mode}_{judge}.csv   (aggregate per group+judge)
-    chats/{sim_model}/imdb/{mode}/user_item_pairs/all/{judge}/eval_*.csv  (per-file)
+    results/judge_{group}_{judge}.csv     (all conversations of one group, scored by one judge)
+    <group folder>/{judge}/eval_*.csv     (one file per conversation)
 """
 
 import os

@@ -1,0 +1,15 @@
+{
+  "phase_a_calls": 116,
+  "phase_a_skipped_with_error": [],
+  "phase_b_calls": 348,
+  "lambdas": [
+    0.3,
+    0.0,
+    1.0
+  ],
+  "tau_run": 0.0,
+  "es_requests_sent": 232,
+  "es_requests_served_from_cache": 464,
+  "self_check_lambda_0.3_mismatches": 0,
+  "mismatch_detail": []
+}
