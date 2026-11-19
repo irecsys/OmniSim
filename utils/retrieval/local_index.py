@@ -197,13 +197,30 @@ def _emb_col(config, precomputed_col, df):
 
 
 def embedding_texts(config, df):
-    """The text each item is embedded from: embedding_fields, default title + category + details (v1 :96-97)."""
+    """The text each item is embedded from: embedding_fields, default title + category + details (v1 :96-97). A
+    local model with embeddings_document_template gets the template filled in: {title} is col_title ("none" when
+    missing), {text} the embedding_fields without the title, joined the same way."""
     fields = config.get('embedding_fields', [config['col_title'], config['col_category'], config['col_details']])
-    return build_embedding_texts(df, fields)
+    from utils.local_embeddings import embedding_spec, is_local
+    template = embedding_spec(config)['document_template'] if is_local(config) else None
+    if not template:
+        return build_embedding_texts(df, fields)
+    col_title = config['col_title']
+    texts = build_embedding_texts(df, [f for f in fields if f != col_title])
+    titles = (df[col_title].fillna('').astype(str).str.strip().tolist() if col_title in df.columns
+              else [''] * len(df))
+    return [template.format(title=t or 'none', text=x) for t, x in zip(titles, texts)]
+
+
+def space_key(config):
+    """The cache rows' `model` value: the model name for an API provider (as before), the space id of a local model
+    (utils.local_embeddings.space_id: model, revision, weights, prompt, template, dim, dtype)."""
+    from utils.local_embeddings import is_local, space_id
+    return space_id(config) if is_local(config) else str(config.get('embeddings_model') or '')
 
 
 def _cache_keys(config, df):
-    model = str(config.get('embeddings_model') or '')
+    model = space_key(config)
     texts = embedding_texts(config, df)
     keys = [(str(i), hashlib.sha256(t.encode('utf-8')).hexdigest(), model)
             for i, t in zip(df[config['col_itemid']], texts)]
@@ -257,7 +274,8 @@ def _api_embed_fn(config):
     model = config.get('embeddings_model')
 
     def embed(texts):
-        return [d.embedding for d in client.embeddings.create(model=model, input=texts).data]
+        kwargs = {'role': 'document'} if getattr(client, 'accepts_role', False) else {}    # items are documents
+        return [d.embedding for d in client.embeddings.create(model=model, input=texts, **kwargs).data]
     return embed
 
 

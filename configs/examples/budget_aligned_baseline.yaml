@@ -1,0 +1,44 @@
+# ============================================================
+# budget_aligned_baseline.yaml — example configuration that limits recommendation attempts to 4
+#
+# Load last, after the system, dataset and embedding configs, e.g.
+#   PYTHONHASHSEED=0 python run.py --config "configs/imdb/imdb.yaml configs/examples/imdb_embeddinggemma.yaml \
+#       configs/examples/budget_aligned_baseline.yaml" --mode free
+# and once each with --mode static and --mode adaptive. Every key not set here keeps its default.
+# ============================================================
+
+# ── Chat: an OpenAI-compatible endpoint (placeholder; put your own base URL and model name) ──
+openai_provider: openai_compatible           # chat provider: openai | azure | azure_foundry | thetaedgecloud | openai_compatible
+chat_endpoint: https://YOUR_ENDPOINT.example.org/v1/   # base URL of the OpenAI-compatible server
+chat_model: YOUR_MODEL                       # model name as the server serves it
+# chat_api_key_env: MY_ENDPOINT_KEY          # name of the environment variable holding the key; unset: no key is sent
+# chat_extra_body:                           # request fields added to every chat request (a mapping); unset: none
+#   chat_template_kwargs:                    # e.g. Qwen models: thinking must be off
+#     enable_thinking: false
+chat_rate_limit: 70/60                       # rate gate: at most N requests in any S seconds ("N/S"); null or "0": off
+# chat_rate_window_file: logs/openai_compatible_rate_window.json   # gate state shared by all processes using this file
+# chat_retry_base: 2                         # first backoff wait in seconds after a 429 / 5xx / timeout; doubled each retry
+# chat_retry_max_wait: 300                   # longest single wait in seconds (Retry-After is followed up to this)
+# chat_retry_total: 1800                     # most seconds of waiting per call; then the call fails
+llm_log_file: logs/llm_calls.jsonl           # passive JSONL log of every returned chat request; null: off
+
+# ── Budget ──
+max_rec_attempts: 4                          # recommendation attempts per dialogue (default 6)
+max_total_rounds: 30                         # stop-loss on main-loop rounds (the default, stated explicitly)
+
+# ── Run ──
+on_llm_error: fail                           # fallback (default) | fail: the first LLM error stops the dialogue
+num_workers: 2                               # parallel worker threads
+chats_per_entry: 1                           # dialogues per input entry
+
+# ── Attributes the agent can ask about: only those that are columns of the IMDB items CSV ──
+item_attributes:
+  adult:                "whether the movie is for adults only"
+  genres:               "genre"
+  original_language:    "original language"
+  production_companies: "production companies"
+  production_countries: "country of origin"
+  spoken_languages:     "spoken languages"
+  vote_average:         "rating"
+  release_year:         "year of movie release"
+default_attributes: ["adult", "original_language", "release_year", "spoken_languages"]

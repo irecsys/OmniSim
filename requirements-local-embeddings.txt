@@ -1,0 +1,17 @@
+# Optional packages for local embedding models (embeddings_provider: sentence-transformers), e.g.
+# google/embeddinggemma-2 (configs/examples/imdb_embeddinggemma.yaml). Not needed for the default setup (Azure embeddings with the shipped
+# precomputed vectors), and not installed by CI.
+#
+# Versions are pinned to releases at least 14 days old when they were chosen (2026-10-29), and checked together
+# with `pip check` (no broken requirements). The CPU build of PyTorch is much smaller than the default CUDA build.
+#
+#   pip install -r requirements-local-embeddings.txt
+#
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1             # 2026-09-30
+torchvision==0.29.1       # 2026-09-30; multimodal processors (EmbeddingGemma 2) import it even for text only
+sentence-transformers==6.1.0   # 2026-09-18; EmbeddingGemma 2 needs >= 6.1.0
+transformers==5.19.0      # 2026-10-06; has the embedding_gemma2 model type
+huggingface-hub==1.33.0   # 2026-09-24; sentence-transformers 6.1.0 needs < 2.0.0
+httpx==0.28.1             # huggingface-hub dependency
+httpcore==1.0.9

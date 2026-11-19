@@ -13,7 +13,7 @@ openai>=2.15.0,<4
 # Optional, not installed by default: sentence-transformers, for embeddings_provider: sentence-transformers
 # (vectors computed locally, no API key) and for the cosine diversity of the evaluation tools.
 # It also installs PyTorch. Install it separately when needed (see README, Optional: local embeddings):
-#   pip install "sentence-transformers>=2.2.0,<7"
+#   pip install -r requirements-local-embeddings.txt
 
 # Retrieval
 rapidfuzz>=3,<4       # reference-title fuzzy matching (utils/retrieval/ref_lookup.py)

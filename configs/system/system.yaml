@@ -28,7 +28,7 @@ seed: 2025
 num_workers: 8          # parallel threads (I/O-bound — LLM API calls)
 max_questions: 3        # max clarifying turns before forcing a recommendation
 library_name: OmniSim
-library_version: "2.0.0"
+library_version: "2.1.0"
 log_path_outputs: logs/
 data_path: data/
 

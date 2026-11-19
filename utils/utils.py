@@ -21,6 +21,9 @@ from openai import AzureOpenAI, OpenAI
 from utils import llm_calls
 from utils.configurator import Config
 from dotenv import load_dotenv
+import logging
+
+logger = logging.getLogger(__name__)   # used by the openai_compatible reply handling below
 
 
 # ---------------------------------------------------------------------------
@@ -104,26 +107,27 @@ class ThetaEdgeCloudClient:
 
 
 class SentenceTransformerEmbeddingsClient:
-    """Local embeddings client using sentence-transformers. Mimics client_embeddings interface."""
-    def __init__(self, model_name: str):
-        import os
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError as e:
-            raise ImportError(
-                "embeddings_provider 'sentence-transformers' needs the optional package sentence-transformers, "
-                "which requirements.txt does not install: pip install \"sentence-transformers>=2.2.0,<7\""
-            ) from e
-        os.environ.setdefault('HF_HUB_OFFLINE', '1')
-        os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')
-        self._model = SentenceTransformer(model_name)
+    """Local embeddings (embeddings_provider sentence-transformers) through
+    utils.local_embeddings.LocalEmbeddingsClient (fixed revision, float32, local files only, weights sha256, the
+    query prompt and the document template). The dialogue code calls
+    embeddings.create without a role, and every such call embeds a seeker-side text (query_embedding,
+    profile_embedding), so a call without a role is a query; the index builder passes role='document'
+    (utils/retrieval/local_index.py)."""
+    accepts_role = True
+
+    def __init__(self, config):
+        from utils.local_embeddings import LocalEmbeddingsClient
+        self._client = LocalEmbeddingsClient(config)
+        self.spec = self._client.spec
         self.embeddings = self
 
-    def create(self, model=None, input=None, **kwargs):
-        texts = [input] if isinstance(input, str) else input
-        vecs = self._model.encode(texts, normalize_embeddings=True).tolist()
-        data = [type("d", (), {"embedding": v})() for v in vecs]
-        return type("r", (), {"data": data})()
+    # Vectors for texts; role "query" adds the query prompt.
+    def encode(self, texts, role='query'):
+        return self._client.encode(texts, role=role)
+
+    # OpenAI-style create(); calls without a role are queries.
+    def create(self, model=None, input=None, role='query', **kwargs):
+        return self._client.create(model=model, input=input, role=role)
 
 
 def _truncate_msg(text: str, max_chars: int = 250) -> str:
@@ -229,42 +233,199 @@ def ensure_dir(dir_path):
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
 
-def _wrap_chat_client(client, default_timeout: float = 60.0):
+# Reply handling for OpenAI-compatible endpoints: a model that thinks puts <think>...</think> before its reply, or the
+# reasoning in a separate field; only message.content without the think block is the reply.
+REASONING_FIELDS = ("reasoning_content", "reasoning")
+_THINK_BLOCK = re.compile(r"\s*<think>.*?</think>\s*", re.DOTALL)
+TURN_THINKING_OFF = ("turn it off with chat_extra_body, e.g. for Qwen: "
+                     "chat_extra_body: {chat_template_kwargs: {enable_thinking: false}}")
+
+
+class ThinkingTruncated(Exception):
+    """openai_compatible: the reply opens a <think> block that is never closed (cut off by max_tokens). Raised from
+    the client call, so it takes the path of any failed LLM call (fallback content, or the conversation stops)."""
+
+
+class NoReplyAfterThinking(Exception):
+    """openai_compatible: the reply has a closing </think> but no text after it. Handled like ThinkingTruncated."""
+
+
+class ThinkingNotOff(ValueError):
+    """openai_compatible: the startup check found signs of thinking. A configuration error: the run stops."""
+
+
+# reasoning_tokens from the usage details of a response (0 when absent).
+def _reasoning_tokens(resp) -> int:
+    details = getattr(getattr(resp, "usage", None), "completion_tokens_details", None)
+    return getattr(details, "reasoning_tokens", None) or 0
+
+
+def _thinking_signs(resp) -> list:
+    """What in a raw response (before _strip_thinking) shows that the model is thinking."""
+    signs = []
+    for ch in getattr(resp, "choices", []) or []:
+        msg = getattr(ch, "message", None)
+        content = getattr(msg, "content", None) or ""
+        signs += [f"{tag} in the reply" for tag in ("<think>", "</think>") if tag in content]
+        signs += [f"'{f}' field" for f in REASONING_FIELDS if getattr(msg, f, None)]
+    if _reasoning_tokens(resp) > 0:
+        signs.append(f"usage reasoning_tokens={_reasoning_tokens(resp)}")
+    return signs
+
+
+def _strip_thinking(content: str) -> str:
+    """openai_compatible replies: removes a leading, closed <think>…</think> block (also an empty one). A leading
+    <think> without </think> raises ThinkingTruncated: the remainder is never returned as the reply. A reply with
+    </think> but no <think> (the template opened the block in the prompt) keeps only the text after the last
+    </think>, with a WARNING; NoReplyAfterThinking when there is none."""
+    m = _THINK_BLOCK.match(content)
+    if m:
+        return content[m.end():]
+    if content.lstrip().startswith("<think>"):
+        raise ThinkingTruncated("the reply starts a <think> block that is not closed (thinking cut off by "
+                                "max_tokens); " + TURN_THINKING_OFF)
+    if "</think>" in content and "<think>" not in content:
+        after = content.rsplit("</think>", 1)[1].strip()
+        if not after:
+            raise NoReplyAfterThinking("the reply has a closing </think> and no text after it; " + TURN_THINKING_OFF)
+        logger.warning("openai_compatible: the reply has a closing </think> without <think>; only the text after the "
+                       "last </think> is kept; " + TURN_THINKING_OFF)
+        return after
+    return content
+
+
+def _current_site():
+    """The call site of the llm_calls.chat() running in this thread (2.0.0's llm_calls._call sets it), or None."""
+    return getattr(llm_calls._local, "site", None)
+
+
+def _wrap_chat_client(client, default_timeout: float = 60.0, extra_body=None, strip_thinking: bool = False,
+                      retry=None, gate=None, call_log=None):
     """Inject default request timeout and replace None content with empty string.
 
     Why: GPT-4o-mini via Azure occasionally returns content=None and the SDK has no
     built-in request timeout, causing hangs + downstream .strip() AttributeErrors.
+
+    extra_body (chat_extra_body): merged into every request; a call site's own extra_body keys
+    win (the dialogue call sites pass none). Request fields only, e.g. Qwen's chat_template_kwargs; no prompt changes.
+    strip_thinking (openai_compatible): at the startup check, any sign of thinking
+    (_thinking_signs) raises ThinkingNotOff and the run stops. Otherwise <think> blocks are removed (_strip_thinking),
+    and a reasoning field or reasoning_tokens > 0 is logged once per client as a WARNING. A reply with an unclosed
+    <think> block (or nothing after </think>) is asked once more with the same request; a second failure raises, so
+    the call takes its site's error path (fallback). The reply text stays message.content.
+    retry / gate (openai_compatible; utils/rate_limit.py): every request first passes the shared
+    rate gate; a 429, 5xx, timeout or connection error is sent again unchanged after an exponential backoff (logged,
+    counted in the run summary's `retries`), and raised only when the total wait is used up.
+    call_log (llm_log_file; utils/llm_log.py): after a request returned, one line with the call
+    site, the request as passed and the reply text is appended; passive (the request, the order of calls, the retries
+    and the random state are unchanged).
     """
     original_create = client.chat.completions.create
+    warned = set()
 
+    # Logs a thinking warning once per client and kind.
+    def warn_once(key, text):
+        if key not in warned:
+            warned.add(key)
+            logger.warning(f"openai_compatible: {text}, so the model is thinking; thinking uses up max_tokens. "
+                           f"{TURN_THINKING_OFF[0].upper()}{TURN_THINKING_OFF[1:]}. Logged once per client.")
+
+    # Sends the request (rate gate, retries), then cleans the reply.
     def safe_create(*args, **kwargs):
         kwargs.setdefault("timeout", default_timeout)
-        resp = original_create(*args, **kwargs)
+        if extra_body:
+            kwargs["extra_body"] = {**extra_body, **(kwargs.get("extra_body") or {})}
+        # One request through the rate gate.
+        def send():
+            if gate is not None:
+                gate.acquire()
+            return original_create(*args, **kwargs)
+
+        resp = retry.call(send) if retry is not None else send()
+        if strip_thinking:
+            signs = _thinking_signs(resp)
+            if signs and _current_site() == "startup_check":
+                raise ThinkingNotOff(f"Config error: thinking is not turned off on the openai_compatible endpoint "
+                                     f"(startup check found: {', '.join(signs)}); " + TURN_THINKING_OFF + ".")
+            if _reasoning_tokens(resp) > 0:
+                warn_once("reasoning_tokens", f"usage reports reasoning_tokens={_reasoning_tokens(resp)}")
         for ch in getattr(resp, "choices", []) or []:
             msg = getattr(ch, "message", None)
             if msg is not None and getattr(msg, "content", None) is None:
                 msg.content = ""
+            if msg is not None and strip_thinking:
+                field = next((f for f in REASONING_FIELDS if getattr(msg, f, None)), None)
+                if field:
+                    warn_once(field, f"the reply carries a '{field}' field")
+                msg.content = _strip_thinking(msg.content)
         return resp
 
-    client.chat.completions.create = safe_create
+    # Asks once more when the thinking was cut off or no reply followed it.
+    def create_with_thinking_retry(*args, **kwargs):
+        try:
+            return safe_create(*args, **kwargs)
+        except (ThinkingTruncated, NoReplyAfterThinking) as e:
+            if _current_site() == "startup_check":
+                raise
+            logger.warning(f"openai_compatible: {e}; asking once more")
+        try:
+            return safe_create(*args, **kwargs)
+        except (ThinkingTruncated, NoReplyAfterThinking) as e:
+            logger.error(f"openai_compatible: {e} (again after one retry)")
+            raise
+
+    create = create_with_thinking_retry if strip_thinking else safe_create
+    if call_log is not None:
+        # The same call, then one line in the call log.
+        def logged_create(*args, **kwargs):
+            resp = create(*args, **kwargs)
+            call_log.record(kwargs, resp)
+            return resp
+        client.chat.completions.create = logged_create
+    else:
+        client.chat.completions.create = create
     return client
 
 
+OPENAI_COMPATIBLE_NO_KEY = "EMPTY"   # openai_compatible without chat_api_key_env: the SDK refuses an empty key
+
+
 def _build_chat_client(provider: str, config, api_key: str):
+    extra_body = config.get("chat_extra_body")             # request fields added to every chat request
+    if extra_body is not None and not isinstance(extra_body, dict):
+        raise ValueError(f"Config error: 'chat_extra_body' must be a mapping of request fields, got {extra_body!r}.")
     if provider == "azure":
         return _wrap_chat_client(AzureOpenAI(
             api_version=config["chat_api_version"],
             azure_endpoint=config["chat_endpoint"],
             api_key=api_key,
-        ))
+        ), extra_body=extra_body)
     elif provider == "azure_foundry":
         azure_key = os.getenv("AZURE_KEY")
         return _wrap_chat_client(OpenAI(
             base_url=config["chat_endpoint"],
             api_key=azure_key,
-        ))
+        ), extra_body=extra_body)
     elif provider == "openai":
-        return _wrap_chat_client(OpenAI(api_key=api_key))
+        return _wrap_chat_client(OpenAI(api_key=api_key), extra_body=extra_body)
+    elif provider == "openai_compatible":
+        # Any OpenAI-compatible endpoint (e.g. a vLLM server); chat_endpoint is its base
+        # URL. The key is the environment variable named by chat_api_key_env, none when it is not set: never
+        # OPENAI_KEY (the api_key argument), which belongs to another service.
+        name = config.get("chat_api_key_env")
+        key = os.getenv(str(name)) if name else OPENAI_COMPATIBLE_NO_KEY
+        if not key:
+            raise ValueError(f"Config error: 'chat_api_key_env' is {name!r}, but the environment variable {name} is "
+                             f"not set or is empty.")
+        # The SDK's own retries are off (max_retries=0); utils.rate_limit retries 429 / 5xx /
+        # timeouts with a long backoff behind a rate gate shared by all processes (for rate-limited servers).
+        from utils.rate_limit import from_config
+        retry, gate = from_config(config, note=llm_calls.note_retry)
+        # the passive call log (llm_log_file; absent or null: none)
+        from utils import llm_log
+        return _wrap_chat_client(OpenAI(base_url=config["chat_endpoint"], api_key=key, max_retries=0),
+                                 extra_body=extra_body, strip_thinking=True, retry=retry, gate=gate,
+                                 call_log=llm_log.from_config(config))
     elif provider == "thetaedgecloud":
         theta_key = os.getenv("THETA_KEY")
         model_slug_map = {
@@ -293,8 +454,7 @@ def _build_embeddings_client(provider: str, config, api_key: str):
         theta_key = os.getenv("THETA_KEY")
         return ThetaEdgeCloudClient(theta_key, "")  # returns None gracefully
     elif provider == "sentence-transformers":
-        model_name = config.get("embeddings_model", "all-MiniLM-L6-v2")
-        return SentenceTransformerEmbeddingsClient(model_name)
+        return SentenceTransformerEmbeddingsClient(config)       # local model (utils/local_embeddings.py)
     else:
         raise ValueError(f"Unknown embeddings provider: {provider}")
 

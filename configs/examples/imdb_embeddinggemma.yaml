@@ -1,0 +1,30 @@
+# ============================================================
+# imdb_embeddinggemma.yaml — overlay: the IMDB catalogue with the local embedding model EmbeddingGemma 2 (offline)
+#
+# Load after the system and dataset configs:
+#   python run.py --config "configs/imdb/imdb.yaml configs/examples/imdb_embeddinggemma.yaml" --build-index
+#
+# Only the embedding keys change. Item and query vectors are computed on this machine (no API key, no network once
+# the model files are downloaded; see README "Optional: local embeddings"). The index goes to its own directory and
+# is built once with --build-index (200 items; CPU is enough).
+# Needs the optional packages: pip install -r requirements-local-embeddings.txt
+# ============================================================
+
+embeddings_provider: sentence-transformers   # embeddings provider: openai | azure | sentence-transformers (local)
+
+embeddings_model: google/embeddinggemma-2    # Hugging Face model id (or a local directory)
+embeddings_revision: f9972ac22e696a105c482202646979e33e4b5a1e   # model commit sha; required for a Hugging Face id
+embeddings_weights_sha256: 197a32965d4b1105faf060417baa899e193fb73cd401f42ec9295234d5553d79   # checked on every load; ~: no check
+
+embeddings_local_path: ~/models/embeddinggemma-2   # directory with the files of that revision; ~ (null): Hugging Face cache
+embeddings_allow_download: false             # true: may download the given revision when missing; false: local files only
+
+embeddings_query_prompt: "task: search result | query: "      # prefix of every query text; ~: none
+embeddings_document_template: "title: {title} | text: {text}" # item text; only {title} and {text}; ~: the joined fields
+embeddings_dim: ~                            # keep the first N components (Matryoshka models); ~: native (768)
+embeddings_dtype: float32                    # float32 | bfloat16 (float16 is refused)
+embeddings_modalities: text                  # text: load the text encoder only; ~: as the model comes
+embeddings_batch_size: 32                    # items encoded per batch (positive integer)
+
+precomputed_embedding_col: ~                 # no precomputed vectors: the index computes them with the model above
+index_dir: index/imdb_embeddinggemma         # a separate index directory for this vector space
